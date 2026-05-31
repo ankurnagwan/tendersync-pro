@@ -1,0 +1,88 @@
+/* content_overlay.css — Injected into gem.gov.in and tendersontime.com */
+/* Scoped with ID to avoid collisions with portal CSS */
+
+#__gem_captcha_overlay__ {
+  all: unset;
+  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2147483647;
+  font-family: 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+}
+
+#__gem_captcha_overlay__ * {
+  box-sizing: border-box;
+}
+
+/* Status bar at bottom-right corner when running */
+#__gem_status_bar__ {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2147483646;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 10px;
+  padding: 10px 16px;
+  color: #f8fafc;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  min-width: 200px;
+  max-width: 320px;
+  transition: all 0.3s ease;
+}
+
+#__gem_status_bar__ .gem-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3b82f6;
+  flex-shrink: 0;
+  animation: gem-pulse 1.4s ease-in-out infinite;
+}
+
+#__gem_status_bar__ .gem-status-dot.done {
+  background: #22c55e;
+  animation: none;
+}
+
+#__gem_status_bar__ .gem-status-dot.error {
+  background: #ef4444;
+  animation: none;
+}
+
+#__gem_status_bar__ .gem-status-text {
+  flex: 1;
+  color: #cbd5e1;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#__gem_status_bar__ .gem-status-count {
+  color: #60a5fa;
+  font-weight: 700;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes gem-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.85); }
+}
+
+/* Highlight cards as they are extracted */
+.gem-card-extracted {
+  outline: 2px solid rgba(59, 130, 246, 0.6) !important;
+  outline-offset: 2px !important;
+  transition: outline 0.3s ease !important;
+}

@@ -1,0 +1,16 @@
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/frontend-ui/dist/$1" }],
+  "functions": { "api/*.js": { "runtime": "edge" } },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Frame-Options", "value": "SAMEORIGIN" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    }
+  ],
+  "buildCommand": "cd frontend-ui && npm install && npm run build",
+  "outputDirectory": "frontend-ui/dist",
+  "installCommand": "cd frontend-ui && npm install"
+}
