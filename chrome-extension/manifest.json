@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "GeM Tender Aggregator Engine",
-  "short_name": "GEM Aggregator",
+  "name": "TenderSync Pro — Scraper Engine",
+  "short_name": "TenderSync",
   "version": "2.0.0",
-  "description": "Elite procurement intelligence engine for GeM Portal and TenderOnTime. Bypasses CORS, handles CAPTCHAs, and streams tender data to your dashboard.",
+  "description": "Elite procurement intelligence engine for GeM Portal and TenderOnTime.",
 
   "icons": {
     "16":  "icons/icon16.png",
@@ -15,10 +15,10 @@
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
-      "16":  "icons/icon16.png",
-      "32":  "icons/icon32.png"
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
     },
-    "default_title": "GeM Aggregator — Click to open status"
+    "default_title": "TenderSync Pro"
   },
 
   "background": {
@@ -30,15 +30,7 @@
     {
       "matches": [
         "https://gem.gov.in/*",
-        "https://mkp.gem.gov.in/*"
-      ],
-      "js": ["utils/constants.js", "utils/dom_utils.js", "content.js"],
-      "css": ["content_overlay.css"],
-      "run_at": "document_idle",
-      "all_frames": false
-    },
-    {
-      "matches": [
+        "https://mkp.gem.gov.in/*",
         "https://www.tendersontime.com/*",
         "https://tendersontime.com/*"
       ],
@@ -58,8 +50,7 @@
     "webRequest",
     "cookies",
     "alarms",
-    "notifications",
-    "offscreen"
+    "notifications"
   ],
 
   "host_permissions": [
@@ -85,11 +76,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": [
-        "icons/*.png",
-        "utils/constants.js",
-        "utils/dom_utils.js"
-      ],
+      "resources": ["icons/*.png", "utils/constants.js", "utils/dom_utils.js"],
       "matches": [
         "https://gem.gov.in/*",
         "https://mkp.gem.gov.in/*",
@@ -101,7 +88,5 @@
 
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
-  },
-
-
+  }
 }
