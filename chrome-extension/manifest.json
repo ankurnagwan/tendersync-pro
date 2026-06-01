@@ -103,7 +103,5 @@
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
 
-  "declarative_net_request": {
-    "rule_resources": []
-  }
+
 }
