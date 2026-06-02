@@ -339,10 +339,25 @@ export function useExtension(extensionId) {
         if (!tender?.bidId) break;
         safe(setTenders)(prev => {
           if (prev.find(t => t.bidId === tender.bidId)) return prev;
-          return [tender, ...prev].slice(0, 2000);
+          return [tender, ...prev].slice(0, 5000);
         });
         upsertManyTenders([tender]).catch(() => {});
         onTenderCallback.current?.(tender);
+        addLog('success', `📄 Captured: ${tender.bidId} — ${tender.title?.slice(0, 50)}`);
+        break;
+      }
+
+      // Handle batch extractions from content script
+      case 'DATA_EXTRACTED_BATCH': {
+        const batch = msg.payload?.tenders || [];
+        if (!batch.length) break;
+        safe(setTenders)(prev => {
+          const existing = new Set(prev.map(t => t.bidId));
+          const newOnes = batch.filter(t => t?.bidId && !existing.has(t.bidId));
+          return [...newOnes, ...prev].slice(0, 5000);
+        });
+        upsertManyTenders(batch).catch(() => {});
+        addLog('success', `📦 Batch received: ${batch.length} contracts`);
         break;
       }
 

@@ -119,12 +119,26 @@ export default function Dashboard() {
   }, []);
 
   // Refresh data when tenders stream in
+  // Live update: whenever extension streams new tenders, merge into display
   useEffect(() => {
     if (ext.tenders.length > 0) {
-      setTenders(ext.tenders);
+      setTenders(prev => {
+        const existingIds = new Set(prev.map(t => t.bidId));
+        const newOnes = ext.tenders.filter(t => !existingIds.has(t.bidId));
+        if (newOnes.length === 0) return prev;
+        return [...newOnes, ...prev];
+      });
       refreshData();
     }
   }, [ext.tenders.length]);
+
+  // Poll DB every 5s during active scrape to catch any missed stream events
+  useEffect(() => {
+    const isRunning = ext.jobs.some(j => !['DONE','FAILED'].includes(j.status));
+    if (!isRunning) return;
+    const interval = setInterval(() => refreshData(), 5000);
+    return () => clearInterval(interval);
+  }, [ext.jobs]);
 
   const refreshData = useCallback(async () => {
     const [t, s, r] = await Promise.all([

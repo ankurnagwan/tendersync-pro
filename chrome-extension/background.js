@@ -405,26 +405,39 @@ async function handleContentMessage(msg, tabId, jobId, sendResponse) {
 
     case C.MSG.DATA_EXTRACTED: {
       const tenders = msg.payload?.tenders || [];
-      const newTenders = tenders.filter(t => !state.seenBidIds.has(t.bidId));
+      if (!tenders.length) { sendResponse({ received: 0 }); break; }
+
+      // Filter out already-seen bid IDs (dedup across sessions)
+      const newTenders = tenders.filter(t => t?.bidId && !state.seenBidIds.has(t.bidId));
       newTenders.forEach(t => state.seenBidIds.add(t.bidId));
 
+      const updatedTotal = (job.totalFound || 0) + newTenders.length;
+      const newProgress  = Math.min((job.progress || 0) + Math.max(10, newTenders.length * 2), 88);
+
       updateJob(jobId, {
-        totalFound: job.totalFound + newTenders.length,
-        tenders: [...job.tenders, ...newTenders],
-        progress: Math.min(job.progress + 15, 80),
+        totalFound: updatedTotal,
+        tenders:    [...(job.tenders || []), ...newTenders],
+        progress:   newProgress,
       });
 
-      // Stream each tender to React immediately
+      log(`[${jobId}] DATA_EXTRACTED: ${newTenders.length} new / ${tenders.length} total in batch`);
+
+      // ── Stream every tender individually to React dashboard ──────────────
+      // This is the critical path — each STREAM_TENDER message updates the Tenders tab live
       for (const tender of newTenders) {
         broadcast({ type: C.MSG.STREAM_TENDER, payload: tender });
-        await humanDelay(50, 120); // stagger stream
+        // Small stagger so React state updates don't batch-drop messages
+        await new Promise(r => setTimeout(r, 80));
       }
 
-      broadcastProgress(jobId,
-        `${job.totalFound + newTenders.length} tenders found. Continuing…`,
-        Math.min(job.progress + 15, 80)
+      // Broadcast progress update
+      broadcastProgress(
+        jobId,
+        `✅ ${updatedTotal} contract${updatedTotal !== 1 ? 's' : ''} captured — scraping continues…`,
+        newProgress
       );
-      sendResponse({ received: newTenders.length });
+
+      sendResponse({ received: newTenders.length, total: updatedTotal });
       break;
     }
 
@@ -464,14 +477,20 @@ async function handleContentMessage(msg, tabId, jobId, sendResponse) {
       sendResponse({ ack: true });
       break;
 
-    case C.MSG.NAVIGATION_DONE:
-      // Content script finished all pages for a category/keyword
-      broadcastProgress(jobId, `Completed: ${msg.payload?.category || ''}`, Math.min(job.progress + 20, 95));
+    case C.MSG.NAVIGATION_DONE: {
+      const finalTotal = msg.payload?.totalExtracted || job.totalFound || 0;
+      broadcastProgress(
+        jobId,
+        `🎉 Scrape complete — ${finalTotal} contract${finalTotal !== 1 ? 's' : ''} captured`,
+        95
+      );
       if (msg.payload?.allDone) {
-        completeJob(jobId);
+        // Small delay so progress message renders before completion
+        setTimeout(() => completeJob(jobId), 600);
       }
       sendResponse({ ack: true });
       break;
+    }
 
     default:
       sendResponse({ unknown: msg.type });
