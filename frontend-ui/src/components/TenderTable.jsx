@@ -388,7 +388,7 @@ const styles = {
   searchWrap: { position: 'relative', display: 'flex', alignItems: 'center' },
   searchIcon: { position: 'absolute', left: 10, fontSize: 13, pointerEvents: 'none' },
   searchInput: { background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '6px 10px 6px 30px', color: '#f8fafc', fontSize: 12, outline: 'none', width: 200 },
-  select: { background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '6px 10px', color: '#f8fafc', fontSize: 12, outline: 'none', cursor: 'pointer' },
+  select: { background: '#1e293b', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: '#f8fafc', fontSize: 12, outline: 'none', cursor: 'pointer' },
   resultCount: { fontSize: 11, color: '#64748b' },
   tableWrap: { overflowX: 'auto', overflowY: 'auto', flex: 1 },
   table: { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 12 },

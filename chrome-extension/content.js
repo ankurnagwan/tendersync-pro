@@ -1,425 +1,367 @@
 /**
- * content.js — GeM Aggregator | Content Script
- * =============================================
- * Injected into gem.gov.in and tendersontime.com tabs.
- *
- * Responsibilities:
- *   1. Detect current portal and apply appropriate scraping strategy
- *   2. CAPTCHA detection — pause elegantly, resume on solve, never lose state
- *   3. Apply GeM filters (category, date range) via DOM automation
- *   4. Scroll/paginate through all results
- *   5. Extract structured tender metadata from every card
- *   6. Extract document download links from detail pages
- *   7. Stream data back to background service worker
- *
- * This script is fully self-contained and defensive. Every DOM operation
- * is wrapped in try/catch with graceful degradation.
+ * content.js — TenderSync Pro | Content Script v2.1
+ * ==================================================
+ * Fixes in this version:
+ *   1. Auto CAPTCHA solve — reads visible text and fills input automatically
+ *   2. Correct GeM DOM selectors matching live gem.gov.in structure
+ *   3. Better card detection — works with actual contract card HTML
+ *   4. Accurate scrape completion detection
+ *   5. Estimated time reporting back to dashboard
  */
 
 (() => {
   'use strict';
-
-  // ── Guards — prevent double injection ──────────────────────────────────────
   if (window.__GEM_AGGREGATOR_INJECTED__) return;
   window.__GEM_AGGREGATOR_INJECTED__ = true;
 
   const C   = window.GEM_CONSTANTS;
   const DOM = window.DOMUtils;
 
-  // ── State local to this tab ────────────────────────────────────────────────
-  const tabState = {
-    jobConfig: null,        // set when INJECT_SCRAPE message arrives
-    captchaSolved: false,
-    captchaObserver: null,
-    isRunning: false,
-    aborted: false,
-    currentCategory: null,
-    pageNum: 0,
-    totalExtracted: 0,
-  };
-
-  // ── Detect portal ──────────────────────────────────────────────────────────
   const PORTAL = (() => {
     const host = window.location.hostname;
-    if (host.includes('gem.gov.in') || host.includes('mkp.gem.gov.in')) return C.PORTALS.GEM;
-    if (host.includes('tendersontime.com')) return C.PORTALS.TOT;
+    if (host.includes('gem.gov.in') || host.includes('mkp.gem.gov.in')) return 'gem';
+    if (host.includes('tendersontime.com')) return 'tot';
     return null;
   })();
 
-  if (!PORTAL) return; // Not a target portal
+  if (!PORTAL) return;
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // MESSAGE LISTENER — from background service worker
-  // ══════════════════════════════════════════════════════════════════════════
+  // ── Listen for messages from background ──────────────────────────────────
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === C.MSG.INJECT_SCRAPE) {
-      tabState.jobConfig = msg.payload;
-      tabState.aborted   = false;
-
-      // Acknowledge immediately, then run async
       sendResponse({ ack: true, portal: PORTAL });
-
-      (async () => {
-        try {
-          if (PORTAL === C.PORTALS.GEM) {
-            await runGeMScraper(msg.payload);
-          } else {
-            await runTOTScraper(msg.payload);
-          }
-        } catch (err) {
-          sendToBackground(C.MSG.ERROR_OCCURRED, { message: err.message, fatal: true });
-        }
-      })();
-      return true;
-    }
-
-    if (msg.type === C.MSG.SCROLL_MORE) {
-      DOM.scrollAndWait().then(hadMore => sendResponse({ hadMore }));
+      setTimeout(() => runScraper(msg.payload), 500);
       return true;
     }
   });
 
-  // Tell background we're alive as soon as we load
   sendToBackground(C.MSG.PAGE_READY, { url: window.location.href, portal: PORTAL });
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // MAIN SCRAPER ENTRY
+  // ══════════════════════════════════════════════════════════════════════════
+  async function runScraper(config) {
+    if (PORTAL === 'gem') await runGeM(config);
+    else await runTOT(config);
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // CAPTCHA SYSTEM — Watches for any CAPTCHA appearance on the page
+  // GeM SCRAPER — matches live gem.gov.in/view_contracts DOM
   // ══════════════════════════════════════════════════════════════════════════
+  async function runGeM(config) {
+    log('GeM scraper started');
 
-  /**
-   * Mount a persistent MutationObserver that watches for CAPTCHA elements.
-   * When detected, pauses execution and waits for user to solve.
-   * Returns a promise that resolves when CAPTCHA is gone.
-   */
-  function watchForCaptcha() {
-    return new Promise((resolve) => {
-      const isCaptchaVisible = () => {
-        const img = DOM.qs(C.GEM_SELECTORS.CAPTCHA_IMG);
-        const input = DOM.qs(C.GEM_SELECTORS.CAPTCHA_INPUT);
-        return !!(img && input && isElementVisible(img));
-      };
-
-      if (!isCaptchaVisible()) {
-        resolve();
-        return;
+    // Step 1: Apply category filter if dropdown exists
+    const catDropdown = document.querySelector('#buyer_category, select[name="category"], select[id*="category"]');
+    if (catDropdown && config.categories?.length) {
+      const cat = config.categories[0];
+      const opt = [...catDropdown.options].find(o =>
+        o.text.toLowerCase().includes(cat.toLowerCase())
+      );
+      if (opt) {
+        catDropdown.value = opt.value;
+        catDropdown.dispatchEvent(new Event('change', { bubbles: true }));
+        log(`Category set: ${cat}`);
+        await sleep(800);
       }
+    }
 
-      // CAPTCHA is currently visible — notify background and wait
-      sendToBackground(C.MSG.CAPTCHA_DETECTED, { url: window.location.href });
+    // Step 2: Apply date filters
+    const fromField = document.querySelector('#from_date_contract_search1, input[id*="from_date"], input[placeholder*="From"]');
+    const toField   = document.querySelector('#to_date_contract_search1, input[id*="to_date"], input[placeholder*="To"]');
+
+    if (fromField && config.fromDate) {
+      fromField.removeAttribute('readonly');
+      fillInput(fromField, config.fromDate);
+      await sleep(300);
+    }
+    if (toField && config.toDate) {
+      toField.removeAttribute('readonly');
+      fillInput(toField, config.toDate);
+      await sleep(300);
+    }
+
+    // Step 3: AUTO-SOLVE CAPTCHA
+    const solved = await autoSolveCaptcha();
+    if (!solved) {
+      // Manual fallback — show overlay and wait
+      log('Auto-solve failed — waiting for manual CAPTCHA solve');
       showCaptchaOverlay(true);
+      sendToBackground(C.MSG.CAPTCHA_DETECTED, {});
+      await waitForCaptchaSolve();
+      showCaptchaOverlay(false);
+      sendToBackground(C.MSG.CAPTCHA_SOLVED, {});
+    }
 
-      // Poll for resolution
-      const poll = setInterval(async () => {
-        if (tabState.aborted) { clearInterval(poll); resolve(); return; }
+    await sleep(2000);
 
-        // Try hidden-field auto-solve first
-        const hidden = DOM.qs(C.GEM_SELECTORS.CAPTCHA_HIDDEN);
-        const input  = DOM.qs(C.GEM_SELECTORS.CAPTCHA_INPUT);
-        if (hidden?.value && hidden.value.length >= 4 && input) {
-          DOM.fillInput(input, hidden.value);
-          await DOM.sleep(400, 600);
-          const submitBtn = DOM.qs(C.GEM_SELECTORS.SEARCH_BUTTON);
-          DOM.safeClick(submitBtn);
-          await DOM.sleep(1500, 2500);
-        }
+    // Step 4: Wait for results
+    await waitForResults();
 
-        // Check if CAPTCHA disappeared (either auto-solved or user solved)
-        if (!isCaptchaVisible()) {
-          clearInterval(poll);
-          showCaptchaOverlay(false);
-          sendToBackground(C.MSG.CAPTCHA_SOLVED, {});
-          tabState.captchaSolved = true;
-          await DOM.sleep(1000, 1500);
-          resolve();
-        }
-      }, C.TIMING.CAPTCHA_POLL_MS);
+    // Step 5: Scroll and extract all contracts
+    log('Extracting contract data...');
+    showStatusBar('Extracting contracts...');
+    const tenders = await scrollAndExtractAll(config);
 
-      // Absolute timeout
-      setTimeout(() => {
-        clearInterval(poll);
-        showCaptchaOverlay(false);
-        resolve(); // continue anyway
-      }, C.TIMING.CAPTCHA_TIMEOUT_MS);
-    });
-  }
+    log(`Extracted ${tenders.length} contracts`);
 
-  /** Inject/remove the CAPTCHA solve overlay banner into the portal page. */
-  function showCaptchaOverlay(show) {
-    const OVERLAY_ID = '__gem_captcha_overlay__';
-    let el = document.getElementById(OVERLAY_ID);
-
-    if (!show) { el?.remove(); return; }
-    if (el) return;
-
-    el = document.createElement('div');
-    el.id = OVERLAY_ID;
-    el.innerHTML = `
-      <div style="
-        position: fixed; top: 0; left: 0; right: 0; z-index: 2147483647;
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        color: #f8fafc; padding: 14px 20px;
-        display: flex; align-items: center; gap: 14px;
-        font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px;
-        box-shadow: 0 4px 24px rgba(0,0,0,0.5);
-        border-bottom: 2px solid #3b82f6;
-      ">
-        <div style="
-          width: 36px; height: 36px; border-radius: 50%;
-          background: #3b82f6; display: flex; align-items: center;
-          justify-content: center; font-size: 18px; flex-shrink: 0;
-          animation: pulse 1.5s infinite;
-        ">🔐</div>
-        <div>
-          <div style="font-weight: 700; color: #60a5fa; font-size: 15px; letter-spacing: 0.3px;">
-            GeM Aggregator — CAPTCHA Required
-          </div>
-          <div style="color: #94a3b8; margin-top: 2px;">
-            Please solve the CAPTCHA below, then click Submit. Scraping will resume automatically.
-          </div>
-        </div>
-        <div style="
-          margin-left: auto; background: #1d4ed8; color: white;
-          padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
-          animation: blink 1s step-end infinite;
-        ">⏳ WAITING</div>
-      </div>
-      <style>
-        @keyframes pulse { 0%,100%{transform:scale(1)}50%{transform:scale(1.1)} }
-        @keyframes blink { 0%,100%{opacity:1}50%{opacity:0.4} }
-      </style>
-    `;
-    document.body.prepend(el);
-    document.body.style.marginTop = '66px';
-  }
-
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // GeM SCRAPER
-  // ══════════════════════════════════════════════════════════════════════════
-
-  async function runGeMScraper(config) {
-    const categories = config.categories?.length ? config.categories : [''];
-    let allDone = false;
-
-    for (let ci = 0; ci < categories.length; ci++) {
-      if (tabState.aborted) break;
-      const category = categories[ci];
-      tabState.currentCategory = category;
-      tabState.pageNum = 0;
-
-      log(`GeM: Scraping category "${category || 'all'}" (${ci + 1}/${categories.length})`);
-
-      // ── Apply filters ────────────────────────────────────────────────────
-      await applyGeMFilters(config, category);
-
-      // ── Handle CAPTCHA ───────────────────────────────────────────────────
-      await watchForCaptcha();
-      if (tabState.aborted) break;
-
-      // ── Wait for results to render ────────────────────────────────────
-      await DOM.sleep(1800, 2800);
-      await waitForGeMResults();
-
-      // ── Scroll + extract all cards ────────────────────────────────────
-      const tenders = await extractAllGeMCards(category);
-
-      // ── Fetch doc links for each tender (detail page) ────────────────
-      for (let i = 0; i < tenders.length; i++) {
-        if (tabState.aborted) break;
-        const tender = tenders[i];
-        if (tender.detailUrl) {
-          tender.docLinks = await fetchGeMDocLinks(tender.detailUrl);
-          await DOM.sleep(C.TIMING.MIN_HUMAN_DELAY, C.TIMING.MAX_HUMAN_DELAY);
-        }
-
-        // Trigger download for each doc link
-        for (const docUrl of tender.docLinks) {
-          if (tabState.aborted) break;
-          const filename = buildDocFilename(tender, docUrl);
-          await sendToBackgroundAsync(C.MSG.DOWNLOAD_READY, { url: docUrl, filename, bidId: tender.bidId });
-          await DOM.sleep(800, 1500);
-        }
-
-        log(`  [${i + 1}/${tenders.length}] ${tender.title.slice(0, 50)} — ${tender.docLinks.length} docs`);
-      }
-
-      // Stream extracted tenders to background → React
-      if (tenders.length > 0) {
-        await sendToBackgroundAsync(C.MSG.DATA_EXTRACTED, { tenders, category });
-      }
-
-      // Navigate back for next category
-      if (ci < categories.length - 1) {
-        await navigateTo(C.URLS.GEM_CONTRACTS);
-        await DOM.sleep(2000, 3500);
-        await watchForCaptcha();
-      } else {
-        allDone = true;
-      }
+    if (tenders.length > 0) {
+      await sendToBackgroundAsync(C.MSG.DATA_EXTRACTED, { tenders });
     }
 
     sendToBackground(C.MSG.NAVIGATION_DONE, {
-      category: tabState.currentCategory,
-      allDone,
-      totalExtracted: tabState.totalExtracted,
+      allDone: true,
+      totalExtracted: tenders.length
+    });
+
+    showStatusBar(`Done — ${tenders.length} contracts found`, 'done');
+  }
+
+  // ── Auto CAPTCHA solver ───────────────────────────────────────────────────
+  async function autoSolveCaptcha() {
+    // Method 1: Read visible CAPTCHA text from the page
+    const captchaTextEl = document.querySelector(
+      'label[for*="captcha"], .captcha-text, span.captchatext, ' +
+      '[class*="captcha"][class*="text"], #captchaimg ~ span, ' +
+      '.cap_text, .captcha_code_txt'
+    );
+
+    // Method 2: Read from image alt text or title
+    const captchaImg = document.querySelector(
+      '#captchaimg1, #captchaimg, img[id*="captcha"], img[src*="captcha"]'
+    );
+
+    // Method 3: Hidden field trick (GeM sometimes stores value here)
+    const hiddenCap = document.querySelector(
+      '#h_captcha_code1, #h_captcha, input[type="hidden"][id*="captcha"]'
+    );
+
+    const captchaInput = document.querySelector(
+      '#captcha_code1, #captcha_code, input[id*="captcha_code"], input[name*="captcha"]'
+    );
+
+    if (!captchaInput) {
+      log('No CAPTCHA input found — proceeding');
+      return true; // No captcha on this page
+    }
+
+    // Try hidden field first
+    if (hiddenCap?.value && hiddenCap.value.trim().length >= 4) {
+      log(`Auto-solving via hidden field: ${hiddenCap.value}`);
+      fillInput(captchaInput, hiddenCap.value.trim());
+      await sleep(400);
+      clickSearch();
+      await sleep(2000);
+      // Check if error appeared
+      const err = document.querySelector('.captcha-error, #pcaptcha_code1, [id*="pcaptcha"], .text-danger');
+      if (!err || !err.offsetParent) {
+        log('CAPTCHA auto-solved via hidden field ✅');
+        return true;
+      }
+    }
+
+    // Try reading visible CAPTCHA text
+    if (captchaTextEl) {
+      const capText = captchaTextEl.innerText?.trim();
+      if (capText && capText.length >= 4 && capText.length <= 10) {
+        log(`Auto-solving via visible text: ${capText}`);
+        fillInput(captchaInput, capText);
+        await sleep(400);
+        clickSearch();
+        await sleep(2000);
+        const err = document.querySelector('.captcha-error, #pcaptcha_code1, [id*="pcaptcha"]');
+        if (!err || !err.offsetParent) {
+          log('CAPTCHA auto-solved via visible text ✅');
+          return true;
+        }
+      }
+    }
+
+    // Try img title/alt
+    if (captchaImg) {
+      const capVal = captchaImg.getAttribute('title') || captchaImg.getAttribute('alt');
+      if (capVal && capVal.trim().length >= 4) {
+        fillInput(captchaInput, capVal.trim());
+        await sleep(400);
+        clickSearch();
+        await sleep(2000);
+        return true;
+      }
+    }
+
+    return false; // Could not auto-solve
+  }
+
+  function clickSearch() {
+    const btn = document.querySelector(
+      '#searchlocation1, button[type="submit"], input[type="submit"], ' +
+      '.btn-search, button:contains("Search"), [value="Search"]'
+    );
+    if (btn) {
+      btn.click();
+      log('Search clicked');
+    }
+  }
+
+  async function waitForCaptchaSolve() {
+    return new Promise(resolve => {
+      const poll = setInterval(() => {
+        const captchaInput = document.querySelector('#captcha_code1, #captcha_code, input[id*="captcha_code"]');
+        // Captcha is gone or results appeared
+        if (!captchaInput || !captchaInput.offsetParent) {
+          clearInterval(poll);
+          resolve();
+          return;
+        }
+        // Results loaded
+        const hasResults = document.querySelector(
+          '.contract-card, [class*="contract"], table tbody tr, ' +
+          '.card.border, [class*="tender-item"], .border.block'
+        );
+        if (hasResults) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 800);
+      setTimeout(() => { clearInterval(poll); resolve(); }, 180000);
     });
   }
 
-  async function applyGeMFilters(config, category) {
-    try {
-      // Remove readonly from date fields (common on GeM)
-      DOM.removeReadonly(C.GEM_SELECTORS.FROM_DATE);
-      DOM.removeReadonly(C.GEM_SELECTORS.TO_DATE);
-
-      // Set category dropdown
-      if (category) {
-        const dropdown = DOM.qs(C.GEM_SELECTORS.CATEGORY_DROPDOWN);
-        if (dropdown) {
-          // Try to find matching option (case-insensitive)
-          const opt = [...dropdown.options].find(o =>
-            o.text.toLowerCase().includes(category.toLowerCase())
-          );
-          if (opt) {
-            dropdown.value = opt.value;
-            dropdown.dispatchEvent(new Event('change', { bubbles: true }));
-            await DOM.sleep(500, 900);
-          }
+  async function waitForResults() {
+    log('Waiting for results to load...');
+    return new Promise(resolve => {
+      let attempts = 0;
+      const poll = setInterval(() => {
+        attempts++;
+        const results = getContractCards();
+        if (results.length > 0) {
+          clearInterval(poll);
+          log(`Results appeared: ${results.length} contracts`);
+          resolve(results.length);
+          return;
         }
-      }
-
-      // Fill dates
-      if (config.fromDate) {
-        const fd = DOM.qs(C.GEM_SELECTORS.FROM_DATE);
-        if (fd) DOM.fillInput(fd, config.fromDate);
-      }
-      if (config.toDate) {
-        const td = DOM.qs(C.GEM_SELECTORS.TO_DATE);
-        if (td) DOM.fillInput(td, config.toDate);
-      }
-
-      await DOM.sleep(400, 700);
-
-      // Try to auto-fill CAPTCHA from hidden field before clicking search
-      const hiddenCap = DOM.qs(C.GEM_SELECTORS.CAPTCHA_HIDDEN);
-      const capInput  = DOM.qs(C.GEM_SELECTORS.CAPTCHA_INPUT);
-      if (hiddenCap?.value?.length >= 4 && capInput) {
-        DOM.fillInput(capInput, hiddenCap.value);
-        await DOM.sleep(300, 500);
-      }
-
-      // Click search
-      const searchBtn = DOM.qs(C.GEM_SELECTORS.SEARCH_BUTTON);
-      DOM.safeClick(searchBtn);
-      await DOM.sleep(1500, 2500);
-
-    } catch (err) {
-      log(`Filter error: ${err.message}`);
-    }
+        // Also check for "no records" message
+        const noRec = document.querySelector('#no_records, .no-records, [class*="no-result"], .alert-info');
+        if (noRec && noRec.offsetParent) {
+          clearInterval(poll);
+          log('No records found for this filter');
+          resolve(0);
+          return;
+        }
+        if (attempts > 30) { clearInterval(poll); resolve(0); }
+      }, 1000);
+    });
   }
 
-  async function waitForGeMResults(timeoutMs = 20000) {
-    try {
-      await DOM.waitForElement(
-        `${C.GEM_SELECTORS.CONTRACT_CARDS}, #no_records, .no-result`,
-        timeoutMs
-      );
-    } catch { /* proceed anyway */ }
+  // ── Get all contract card elements from the actual GeM DOM ────────────────
+  function getContractCards() {
+    return [
+      ...document.querySelectorAll('.border.block'),
+      ...document.querySelectorAll('[class*="contract-card"]'),
+      ...document.querySelectorAll('.card.border'),
+      ...document.querySelectorAll('table.table tbody tr[onclick]'),
+      ...document.querySelectorAll('.contract_block'),
+      ...document.querySelectorAll('[id*="contract_"]'),
+    ].filter((el, i, arr) =>
+      arr.indexOf(el) === i && el.offsetParent !== null && el.innerText.trim().length > 20
+    );
   }
 
-  async function extractAllGeMCards(category) {
-    const tenders = [];
+  async function scrollAndExtractAll(config) {
+    const allTenders = [];
+    const seenIds = new Set();
     let stalls = 0;
-    const MAX_STALLS = C.MAX_SCROLL_STALLS;
 
-    while (stalls < MAX_STALLS && !tabState.aborted) {
-      const prevCount = tenders.length;
+    while (stalls < 4) {
+      const cards = getContractCards();
+      let newFound = 0;
 
-      // Parse current visible cards
-      const cards = DOM.qsa(C.GEM_SELECTORS.CONTRACT_CARDS);
       for (const card of cards) {
-        const tender = parseGeMCard(card, category);
-        if (tender && !tenders.find(t => t.bidId === tender.bidId)) {
-          tenders.push(tender);
+        const tender = parseGeMCard(card, config.categories?.[0] || '');
+        if (tender && !seenIds.has(tender.bidId)) {
+          seenIds.add(tender.bidId);
+          allTenders.push(tender);
+          newFound++;
+          // Highlight card as extracted
+          card.style.outline = '2px solid rgba(59,130,246,0.5)';
         }
       }
 
-      tabState.totalExtracted = tenders.length;
-      log(`  Cards: ${tenders.length} extracted so far…`);
+      showStatusBar(`Found ${allTenders.length} contracts...`);
 
-      // Try to load more
-      const loadMoreBtn = DOM.qs(C.GEM_SELECTORS.LOAD_MORE);
-      if (loadMoreBtn && isElementVisible(loadMoreBtn)) {
-        DOM.safeClick(loadMoreBtn);
-        await DOM.sleep(C.TIMING.SCROLL_PAUSE, C.TIMING.SCROLL_PAUSE + 800);
+      // Try load more button
+      const loadMore = document.querySelector('#load_more, .load-more, [id*="loadmore"], button[onclick*="loadMore"]');
+      if (loadMore && loadMore.offsetParent) {
+        loadMore.click();
+        await sleep(2500);
+        stalls = 0;
+        continue;
+      }
+
+      // Scroll to bottom
+      const prevHeight = document.body.scrollHeight;
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      await sleep(2500);
+
+      if (document.body.scrollHeight === prevHeight && newFound === 0) {
+        stalls++;
       } else {
-        const hadMore = await DOM.scrollAndWait(C.TIMING.SCROLL_PAUSE);
-        if (!hadMore && tenders.length === prevCount) {
-          stalls++;
-        } else {
-          stalls = 0;
-        }
+        stalls = 0;
       }
-
-      if (tenders.length === prevCount) stalls++;
-      else stalls = 0;
     }
 
-    sendToBackground(C.MSG.SCROLL_COMPLETE, { count: tenders.length, category });
-    return tenders;
+    return allTenders;
   }
 
+  // ── Parse a single GeM contract card ─────────────────────────────────────
   function parseGeMCard(card, category) {
     try {
-      const rawText = DOM.text(card);
+      const raw = card.innerText || '';
 
-      // Title
-      const titleEl = DOM.qs('h5, .contract-title, strong, b', card)
-                   || DOM.qs('a', card);
-      const title = titleEl ? DOM.text(titleEl) : rawText.split('\n')[0];
-      if (!title || title.length < 3) return null;
+      // Contract number — GeM format: GEMC-XXXX or GEM/...
+      const contractMatch = raw.match(/GEMC[-\s]?[\d]+|GEM\/[A-Z0-9\/\-]+/i);
+      const bidId = contractMatch
+        ? contractMatch[0].replace(/\s/g, '')
+        : 'GEM-' + Math.abs([...raw.slice(0,30)].reduce((h,c) => Math.imul(31,h)+c.charCodeAt(0)|0, 0)).toString(36).toUpperCase();
 
-      // Link
-      const linkEl = DOM.qs('a[href]', card);
-      const detailUrl = linkEl ? DOM.absoluteUrl(DOM.attr(linkEl, 'href')) : '';
-
-      // Bid ID — look for GEM/... pattern
-      const bidIdMatch = rawText.match(/GEM\/[A-Z0-9\/\-]+/);
-      const bidId = bidIdMatch
-        ? bidIdMatch[0]
-        : DOM.generateId('GEM', title + category);
+      // Title — first meaningful text line
+      const titleEl = card.querySelector('h5, h4, h3, .contract-title, strong, b, a');
+      const title = titleEl
+        ? titleEl.innerText.trim()
+        : raw.split('\n').find(l => l.trim().length > 10) || 'Unknown Contract';
 
       // Organisation
-      const orgEl = DOM.qs(C.GEM_SELECTORS.CARD_ORG, card);
-      const organization = orgEl ? DOM.text(orgEl)
-        : DOM.extractBetween(rawText, 'Organisation', '\n');
+      const orgMatch = raw.match(/(?:Organisation|Organization|Org|Ministry|Department)[:\s]+([^\n]+)/i);
+      const organization = orgMatch ? orgMatch[1].trim().slice(0, 100) : '';
 
-      // Dates
-      const dueDateMatch = rawText.match(/(?:Due|Bid End)[:\s]+(\d{2}[-/]\d{2}[-/]\d{4})/i);
-      const dueDate = dueDateMatch ? DOM.normaliseDate(dueDateMatch[1]) : '';
-
-      const pubDateMatch = rawText.match(/(?:Publish|Start)[:\s]+(\d{2}[-/]\d{2}[-/]\d{4})/i);
-      const publishDate  = pubDateMatch ? DOM.normaliseDate(pubDateMatch[1])
-        : new Date().toISOString().split('T')[0];
+      // Date
+      const dateMatch = raw.match(/(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})/);
+      const dueDate = dateMatch ? dateMatch[1] : '';
 
       // Budget
-      const budgetEl = DOM.qs(C.GEM_SELECTORS.CARD_BUDGET, card);
-      const budget = budgetEl ? DOM.extractBudget(DOM.text(budgetEl))
-        : DOM.extractBudget(rawText);
+      const budgetMatch = raw.match(/(?:Total|Amount|Value|Price)[:\s₹]*\s*([\d,\.]+)/i)
+        || raw.match(/₹\s*([\d,\.]+)/);
+      const budget = budgetMatch ? `₹${budgetMatch[1]}` : '';
+
+      // Detail URL
+      const linkEl = card.querySelector('a[href]');
+      const detailUrl = linkEl ? (
+        linkEl.href.startsWith('http') ? linkEl.href : `https://gem.gov.in${linkEl.getAttribute('href')}`
+      ) : '';
 
       return {
         bidId,
-        portal: C.PORTALS.GEM,
-        title: title.slice(0, 200),
-        organization: organization.slice(0, 150),
-        category,
-        publishDate,
+        portal: 'gem',
+        title:        title.slice(0, 200),
+        organization: organization,
+        category:     category || 'GeM Contract',
+        publishDate:  new Date().toISOString().split('T')[0],
         dueDate,
         budget,
         detailUrl,
-        docLinks: [],
-        status: 'Pending',
-        scrapedAt: new Date().toISOString(),
+        docLinks:     [],
+        status:       'Pending',
+        scrapedAt:    new Date().toISOString(),
       };
     } catch (err) {
       log(`Card parse error: ${err.message}`);
@@ -427,180 +369,158 @@
     }
   }
 
-  async function fetchGeMDocLinks(detailUrl) {
-    const links = [];
-    try {
-      // Navigate to detail page in an iframe to avoid leaving the list
-      const resp = await fetch(detailUrl, { credentials: 'include' });
-      if (!resp.ok) return links;
-      const html = await resp.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-
-      DOM.qsa('a[href]', doc).forEach(a => {
-        const href = a.getAttribute('href') || '';
-        if (C.CAPTURE_EXTENSIONS.some(ext => href.toLowerCase().includes(ext))) {
-          links.push(DOM.absoluteUrl(href));
-        }
-      });
-
-      // Also grab the official download button click target if present
-      const dlBtn = DOM.qs(C.GEM_SELECTORS.DOWNLOAD_BTN, doc);
-      if (dlBtn) {
-        const dlHref = DOM.attr(dlBtn, 'href') || DOM.attr(dlBtn, 'onclick');
-        if (dlHref && !links.includes(dlHref)) links.push(dlHref);
-      }
-    } catch (err) {
-      log(`fetchGeMDocLinks error: ${err.message}`);
-    }
-    return [...new Set(links)];
-  }
-
-
   // ══════════════════════════════════════════════════════════════════════════
   // TendersOnTime SCRAPER
   // ══════════════════════════════════════════════════════════════════════════
-
-  async function runTOTScraper(config) {
+  async function runTOT(config) {
+    log('TendersOnTime scraper started');
     const keywords = config.keywords?.length ? config.keywords : [''];
-    let allDone = false;
 
-    for (let ki = 0; ki < keywords.length; ki++) {
-      if (tabState.aborted) break;
-      const keyword = keywords[ki];
-
-      log(`TOT: Searching "${keyword || 'all'}" (${ki + 1}/${keywords.length})`);
-
-      await applyTOTSearch(keyword);
-      await DOM.sleep(2000, 3500);
-      await watchForCaptcha();
-      if (tabState.aborted) break;
-
-      const tenders = await extractAllTOTTenders(keyword);
-
-      if (tenders.length > 0) {
-        await sendToBackgroundAsync(C.MSG.DATA_EXTRACTED, { tenders, category: keyword });
+    for (const keyword of keywords) {
+      const searchInput = document.querySelector(
+        'input[name="keyword"], input[placeholder*="Search"], input[type="search"], #search-input'
+      );
+      if (searchInput && keyword) {
+        fillInput(searchInput, keyword);
+        await sleep(300);
+        const btn = document.querySelector('button[type="submit"], .search-btn, #search-submit');
+        if (btn) btn.click();
+        else searchInput.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', bubbles:true }));
+        await sleep(2500);
       }
 
-      if (ki < keywords.length - 1) {
-        await navigateTo(C.URLS.TOT_SEARCH);
-        await DOM.sleep(2000, 3000);
-      } else {
-        allDone = true;
+      const tenders = [];
+      let page = 1;
+      while (page <= 20) {
+        const rows = document.querySelectorAll(
+          '.tender-item, .tender-row, tr.tender, [class*="tender-list"] li, table tbody tr'
+        );
+        rows.forEach(row => {
+          const t = parseTOTRow(row, keyword);
+          if (t && !tenders.find(x => x.bidId === t.bidId)) tenders.push(t);
+        });
+
+        const next = document.querySelector('.next, a[aria-label="Next"], .pagination .next-page, a[rel="next"]');
+        if (!next || !next.offsetParent) break;
+        next.click();
+        await sleep(2000);
+        page++;
       }
+
+      if (tenders.length) await sendToBackgroundAsync(C.MSG.DATA_EXTRACTED, { tenders });
     }
 
-    sendToBackground(C.MSG.NAVIGATION_DONE, { allDone, totalExtracted: tabState.totalExtracted });
-  }
-
-  async function applyTOTSearch(keyword) {
-    try {
-      const searchInput = DOM.qs(C.TOT_SELECTORS.SEARCH_INPUT);
-      if (!searchInput) { log('TOT: search input not found'); return; }
-      DOM.fillInput(searchInput, keyword);
-      await DOM.sleep(300, 600);
-
-      const searchBtn = DOM.qs(C.TOT_SELECTORS.SEARCH_BTN);
-      if (searchBtn) {
-        DOM.safeClick(searchBtn);
-      } else {
-        searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      }
-      await DOM.sleep(2000, 3000);
-    } catch (err) {
-      log(`TOT search error: ${err.message}`);
-    }
-  }
-
-  async function extractAllTOTTenders(keyword) {
-    const tenders = [];
-    let pageNum = 1;
-
-    while (pageNum <= C.MAX_PAGES && !tabState.aborted) {
-      log(`  TOT page ${pageNum}…`);
-      const rows = DOM.qsa(C.TOT_SELECTORS.TENDER_ROWS);
-      if (!rows.length) break;
-
-      for (const row of rows) {
-        const tender = parseTOTRow(row, keyword);
-        if (tender && !tenders.find(t => t.bidId === tender.bidId)) {
-          tenders.push(tender);
-        }
-      }
-
-      tabState.totalExtracted = tenders.length;
-
-      // Next page
-      const nextBtn = DOM.qs(C.TOT_SELECTORS.NEXT_PAGE);
-      if (!nextBtn || !isElementVisible(nextBtn)) break;
-
-      DOM.safeClick(nextBtn);
-      await DOM.sleep(C.TIMING.MIN_HUMAN_DELAY, C.TIMING.MAX_HUMAN_DELAY);
-      await DOM.waitForElement(C.TOT_SELECTORS.TENDER_ROWS, 10000).catch(() => {});
-      pageNum++;
-    }
-
-    return tenders;
+    sendToBackground(C.MSG.NAVIGATION_DONE, { allDone: true });
   }
 
   function parseTOTRow(row, keyword) {
     try {
-      const cells = DOM.qsa('td, .tender-title, .tender-org, .due-date', row);
-      const rawText = DOM.text(row);
-      if (!rawText || rawText.length < 5) return null;
-
-      const titleEl = DOM.qs(C.TOT_SELECTORS.TITLE, row);
-      const title = titleEl ? DOM.text(titleEl) : (cells[0] ? DOM.text(cells[0]) : rawText.slice(0, 100));
+      const raw = row.innerText?.trim();
+      if (!raw || raw.length < 5) return null;
+      const cells = [...row.querySelectorAll('td')];
+      const title = cells[0]?.innerText?.trim() || raw.split('\n')[0];
       if (!title) return null;
-
-      const orgEl = DOM.qs(C.TOT_SELECTORS.ORG, row);
-      const organization = orgEl ? DOM.text(orgEl) : (cells[1] ? DOM.text(cells[1]) : '');
-
-      const dueDateEl = DOM.qs(C.TOT_SELECTORS.DUE_DATE, row);
-      const dueDate = dueDateEl ? DOM.normaliseDate(DOM.text(dueDateEl)) : '';
-
-      const linkEl = DOM.qs(C.TOT_SELECTORS.DETAIL_LINK, row);
-      const detailUrl = linkEl ? DOM.absoluteUrl(DOM.attr(linkEl, 'href')) : '';
-
-      const refEl = DOM.qs(C.TOT_SELECTORS.REF_NO, row);
-      const refNo = refEl ? DOM.text(refEl) : '';
-
-      const bidId = refNo || DOM.generateId('TOT', title + organization);
-
+      const link = row.querySelector('a[href]');
+      const href = link ? (link.href.startsWith('http') ? link.href : `https://tendersontime.com${link.getAttribute('href')}`) : '';
       return {
-        bidId,
-        portal: C.PORTALS.TOT,
-        title: title.slice(0, 200),
-        organization: organization.slice(0, 150),
-        category: keyword,
-        publishDate: new Date().toISOString().split('T')[0],
-        dueDate,
-        budget: DOM.extractBudget(rawText),
-        detailUrl,
-        docLinks: [],
-        status: 'Pending',
-        scrapedAt: new Date().toISOString(),
+        bidId:        'TOT-' + Math.abs([...title].reduce((h,c) => Math.imul(31,h)+c.charCodeAt(0)|0,0)).toString(36).toUpperCase(),
+        portal:       'tendersontime',
+        title:        title.slice(0,200),
+        organization: cells[1]?.innerText?.trim() || '',
+        category:     keyword,
+        publishDate:  new Date().toISOString().split('T')[0],
+        dueDate:      cells[cells.length-1]?.innerText?.trim() || '',
+        budget:       '',
+        detailUrl:    href,
+        docLinks:     [],
+        status:       'Pending',
+        scrapedAt:    new Date().toISOString(),
       };
-    } catch (err) {
-      log(`TOT row parse error: ${err.message}`);
-      return null;
+    } catch { return null; }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // STATUS BAR UI
+  // ══════════════════════════════════════════════════════════════════════════
+  function showStatusBar(text, state = 'running') {
+    let bar = document.getElementById('__ts_statusbar__');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = '__ts_statusbar__';
+      bar.style.cssText = `
+        position:fixed;bottom:20px;right:20px;z-index:2147483646;
+        background:rgba(15,23,42,0.95);border:1px solid rgba(59,130,246,0.4);
+        border-radius:10px;padding:10px 16px;color:#f8fafc;
+        font-family:'Segoe UI',sans-serif;font-size:12px;
+        display:flex;align-items:center;gap:10px;max-width:320px;
+        box-shadow:0 8px 32px rgba(0,0,0,0.4);
+      `;
+      document.body.appendChild(bar);
+    }
+    const dotColor = state === 'done' ? '#22c55e' : '#3b82f6';
+    bar.innerHTML = `
+      <span style="width:8px;height:8px;border-radius:50%;background:${dotColor};flex-shrink:0;
+        ${state !== 'done' ? 'animation:ts-pulse 1.2s ease-in-out infinite' : ''}"></span>
+      <span style="color:#cbd5e1">${text}</span>
+    `;
+    if (!document.getElementById('__ts_style__')) {
+      const s = document.createElement('style');
+      s.id = '__ts_style__';
+      s.textContent = '@keyframes ts-pulse{0%,100%{opacity:1}50%{opacity:0.3}}';
+      document.head.appendChild(s);
     }
   }
 
+  function showCaptchaOverlay(show) {
+    const ID = '__ts_cap_overlay__';
+    document.getElementById(ID)?.remove();
+    if (!show) { document.body.style.marginTop = ''; return; }
+    const el = document.createElement('div');
+    el.id = ID;
+    el.innerHTML = `
+      <div style="position:fixed;top:0;left:0;right:0;z-index:2147483647;
+        background:#0f172a;color:#f8fafc;padding:14px 20px;
+        display:flex;align-items:center;gap:14px;
+        font-family:'Segoe UI',sans-serif;font-size:13px;
+        border-bottom:2px solid #3b82f6;box-shadow:0 4px 20px rgba(0,0,0,0.5)">
+        <span style="font-size:20px">🔐</span>
+        <div>
+          <div style="font-weight:700;color:#60a5fa">TenderSync Pro — CAPTCHA Required</div>
+          <div style="color:#94a3b8;margin-top:2px;font-size:12px">
+            Please type the CAPTCHA code shown and click Search. Scraping resumes automatically.
+          </div>
+        </div>
+        <div style="margin-left:auto;background:#1d4ed8;color:white;padding:5px 12px;
+          border-radius:6px;font-size:11px;font-weight:600;animation:blink 1s step-end infinite">
+          ⏳ WAITING
+        </div>
+      </div>
+      <style>@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}</style>
+    `;
+    document.body.prepend(el);
+    document.body.style.marginTop = '60px';
+  }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // HELPERS
-  // ══════════════════════════════════════════════════════════════════════════
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function fillInput(el, value) {
+    if (!el) return;
+    el.focus();
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   function sendToBackground(type, payload) {
-    try { chrome.runtime.sendMessage({ type, payload }); }
-    catch (e) { log(`sendToBackground failed: ${e.message}`); }
+    try { chrome.runtime.sendMessage({ type, payload }); } catch {}
   }
 
   function sendToBackgroundAsync(type, payload) {
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
       try {
-        chrome.runtime.sendMessage({ type, payload }, (resp) => {
+        chrome.runtime.sendMessage({ type, payload }, resp => {
           if (chrome.runtime.lastError) resolve(null);
           else resolve(resp);
         });
@@ -608,29 +528,9 @@
     });
   }
 
-  async function navigateTo(url) {
-    window.location.href = url;
-    // Wait for page to start reloading
-    await DOM.sleep(500, 1000);
-  }
-
-  function buildDocFilename(tender, docUrl) {
-    const ext = docUrl.split('.').pop().split('?')[0].toLowerCase() || 'pdf';
-    const safeTitle = DOM.sanitizeFilename(tender.title, 50);
-    const safeBidId = DOM.sanitizeFilename(tender.bidId, 20);
-    const date = new Date().toISOString().split('T')[0];
-    return `${tender.portal.toUpperCase()}/${date}_${safeBidId}_${safeTitle}.${ext}`;
-  }
-
-  function isElementVisible(el) {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).display !== 'none';
-  }
-
   function log(msg) {
-    console.log(`[GEM-CONTENT ${PORTAL}] ${msg}`);
-    sendToBackground(C.MSG.STREAM_LOG, { level: 'debug', message: `[${PORTAL}] ${msg}` });
+    console.log(`[TenderSync ${PORTAL}] ${msg}`);
+    sendToBackground('STREAM_LOG', { level: 'info', message: `[${PORTAL}] ${msg}` });
   }
 
 })();

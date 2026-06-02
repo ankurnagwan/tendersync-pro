@@ -377,15 +377,39 @@ export default function Dashboard() {
           {/* ── TAB: Live Run ── */}
           {activeTab === 'run' && (
             <div style={s.panel}>
+
+              {/* ── Login requirement notice ── */}
+              <div style={{ display:'flex', gap:10, marginBottom:16, flexWrap:'wrap' }}>
+                <div style={{ flex:1, background:'rgba(59,130,246,0.08)', border:'1px solid rgba(59,130,246,0.2)', borderRadius:8, padding:'10px 14px', fontSize:11, color:'#94a3b8', minWidth:200 }}>
+                  <span style={{ color:'#60a5fa', fontWeight:700 }}>ℹ️ GeM Login Required?</span>
+                  <span style={{ display:'block', marginTop:3 }}>
+                    No login needed for <b style={{color:'#f8fafc'}}>public contract data</b> (gem.gov.in/view_contracts). 
+                    Login only needed for bidding/downloading private docs.
+                  </span>
+                </div>
+                <div style={{ flex:1, background:'rgba(34,197,94,0.07)', border:'1px solid rgba(34,197,94,0.2)', borderRadius:8, padding:'10px 14px', fontSize:11, color:'#94a3b8', minWidth:200 }}>
+                  <span style={{ color:'#4ade80', fontWeight:700 }}>⏱️ Estimated Time</span>
+                  <span style={{ display:'block', marginTop:3 }}>
+                    <b style={{color:'#f8fafc'}}>1–3 min</b> for 50 contracts · 
+                    <b style={{color:'#f8fafc'}}> 5–10 min</b> for 200+ contracts · 
+                    Depends on CAPTCHA solve time.
+                  </span>
+                </div>
+              </div>
+
               {/* CAPTCHA Alert */}
               {ext.isPaused && (
                 <div style={s.captchaAlert}>
-                  <span style={{ fontSize: 20 }}>🔐</span>
-                  <div>
-                    <div style={{ fontWeight: 700, color: '#fbbf24' }}>CAPTCHA Detected</div>
-                    <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>
-                      Switch to the browser tab with the GeM portal and solve the CAPTCHA. Scraping will resume automatically.
+                  <span style={{ fontSize: 24 }}>🔐</span>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontWeight: 700, color: '#fbbf24', fontSize:14 }}>CAPTCHA Required</div>
+                    <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>
+                      Switch to the GeM browser tab → type the CAPTCHA code → click Search. 
+                      Scraping resumes automatically within 2 seconds of solving.
                     </div>
+                  </div>
+                  <div style={{ background:'#92400e', color:'#fde68a', padding:'6px 12px', borderRadius:6, fontSize:11, fontWeight:700, whiteSpace:'nowrap' }}>
+                    ⏳ WAITING
                   </div>
                 </div>
               )}
@@ -402,49 +426,71 @@ export default function Dashboard() {
                     }}>
                       <span>{stage.icon}</span>
                       <span style={{ fontSize: 11, fontWeight: 600 }}>{stage.label}</span>
-                      {activeStage === i && (
-                        <span style={{ fontSize: 10, animation: 'pulse 1s infinite', color: '#93c5fd' }}>●</span>
-                      )}
+                      {activeStage === i && <span style={{ fontSize:9, color:'#93c5fd' }}>●</span>}
                     </div>
                     {i < STAGES.length - 1 && (
-                      <div style={{ height: 1, flex: '0 0 16px', background: activeStage > i ? '#22c55e' : 'rgba(255,255,255,0.08)' }} />
+                      <div style={{ height: 1, flex: '0 0 12px', background: activeStage > i ? '#22c55e' : 'rgba(255,255,255,0.08)' }} />
                     )}
                   </div>
                 ))}
               </div>
 
-              {/* Progress bar */}
-              {activeJob && (
-                <div style={{ margin: '16px 0' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                    <span style={{ fontSize: 12, color: '#94a3b8' }}>
-                      {activeJob.message || `${activeJob.portal?.toUpperCase()} — ${activeJob.status}`}
-                    </span>
-                    <span style={{ fontSize: 12, color: '#3b82f6', fontWeight: 700 }}>{activeJob.progress || 0}%</span>
+              {/* Progress + Live Timer */}
+              {activeJob && (() => {
+                const elapsed = activeJob.startedAt ? Math.floor((Date.now() - activeJob.startedAt) / 1000) : 0;
+                const mins = Math.floor(elapsed / 60);
+                const secs = elapsed % 60;
+                const elapsedStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                const found = activeJob.totalFound || 0;
+                const rate = elapsed > 5 ? (found / elapsed * 60).toFixed(1) : '—';
+                return (
+                  <div style={{ margin: '14px 0', background:'rgba(255,255,255,0.02)', borderRadius:8, padding:'12px 14px', border:'1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, alignItems:'center' }}>
+                      <span style={{ fontSize: 12, color: '#94a3b8' }}>
+                        {activeJob.message || `${activeJob.portal?.toUpperCase()} — ${activeJob.status}`}
+                      </span>
+                      <span style={{ fontSize: 13, color: '#3b82f6', fontWeight: 700 }}>{activeJob.progress || 0}%</span>
+                    </div>
+                    <div style={s.progressTrack}>
+                      <div style={{ ...s.progressBar, width: `${activeJob.progress || 0}%` }} />
+                    </div>
+                    {/* Stats row */}
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:8, marginTop:10 }}>
+                      {[
+                        { label:'Found',      val: found,                    color:'#3b82f6' },
+                        { label:'Downloaded', val: activeJob.downloaded||0,  color:'#22c55e' },
+                        { label:'Failed',     val: activeJob.failed||0,      color:'#ef4444' },
+                        { label:'Elapsed',    val: elapsedStr,               color:'#a855f7' },
+                        { label:'Rate/min',   val: rate,                     color:'#f59e0b' },
+                      ].map(stat => (
+                        <div key={stat.label} style={{ textAlign:'center', background:'rgba(255,255,255,0.03)', borderRadius:6, padding:'6px 4px' }}>
+                          <div style={{ fontSize:14, fontWeight:700, color:stat.color, fontVariantNumeric:'tabular-nums' }}>{stat.val}</div>
+                          <div style={{ fontSize:9, color:'#475569', marginTop:2, letterSpacing:'0.5px', textTransform:'uppercase' }}>{stat.label}</div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <div style={s.progressTrack}>
-                    <div style={{ ...s.progressBar, width: `${activeJob.progress || 0}%` }} />
-                  </div>
-                  <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: '#64748b' }}>
-                    <span>Found: <b style={{ color: '#3b82f6' }}>{activeJob.totalFound || 0}</b></span>
-                    <span>Downloaded: <b style={{ color: '#22c55e' }}>{activeJob.downloaded || 0}</b></span>
-                    <span>Failed: <b style={{ color: '#ef4444' }}>{activeJob.failed || 0}</b></span>
-                  </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Live log */}
               <div style={s.logWrap}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, alignItems:'center' }}>
                   <span style={s.sectionLabel}>LIVE LOG</span>
-                  <button style={{ ...s.btn, ...s.btnGhost, fontSize: 10, padding: '3px 8px' }} onClick={() => ext.addLog && setImmediate(() => {})}>
-                    Clear
-                  </button>
+                  <div style={{ display:'flex', gap:6 }}>
+                    <span style={{ fontSize:10, color:'#334155', alignSelf:'center' }}>
+                      {ext.logs.length} entries
+                    </span>
+                    <button style={{ ...s.btn, ...s.btnGhost, fontSize: 10, padding: '3px 8px' }}
+                      onClick={() => window.location.reload()}>
+                      Clear
+                    </button>
+                  </div>
                 </div>
                 <div style={s.logBox}>
                   {ext.logs.length === 0 && (
                     <div style={{ color: '#334155', fontStyle: 'italic', padding: 8 }}>
-                      Waiting for activity…
+                      Set your category above and click 🚀 Start Scrape to begin…
                     </div>
                   )}
                   {ext.logs.map(line => (
