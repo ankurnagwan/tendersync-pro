@@ -101,12 +101,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
   if (!tabId) return;
 
+  // ── CAPTCHA Vision solve — doesn't need a job ID ─────────────────────────
+  if (msg.type === 'SOLVE_CAPTCHA_IMAGE') {
+    solveCaptchaWithGemini(msg.payload?.base64).then(text => {
+      sendResponse({ text: text || null });
+    }).catch(() => sendResponse({ text: null }));
+    return true;
+  }
+
   const jobId = state.tabJobs.get(tabId);
   if (!jobId) return;
 
   handleContentMessage(msg, tabId, jobId, sendResponse);
-  return true; // keep channel open for async response
+  return true;
 });
+
+// ── Gemini Vision CAPTCHA solver ─────────────────────────────────────────────
+async function solveCaptchaWithGemini(base64Image) {
+  if (!base64Image) return null;
+  try {
+    log('Sending CAPTCHA to Gemini Vision...');
+
+    // Try the Vercel edge function first (has API key server-side)
+    const vercelUrls = [
+      'https://tendersync-pro.vercel.app/api/gemini',
+      'https://tendersync-pro-git-main-nagwanankur-1079s-projects.vercel.app/api/gemini',
+    ];
+
+    for (const url of vercelUrls) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            captchaImage: base64Image,
+            prompt: 'This is a CAPTCHA image. Read the alphanumeric characters shown and reply with ONLY those characters, nothing else. No spaces, no punctuation, just the characters.',
+          }),
+        });
+        if (!resp.ok) continue;
+        const data = await resp.json();
+        const text = (data.report || data.text || '').trim().replace(/[^a-zA-Z0-9]/g, '');
+        if (text.length >= 4 && text.length <= 10) {
+          log(`Gemini Vision solved CAPTCHA: "${text}"`);
+          return text;
+        }
+      } catch { continue; }
+    }
+
+    log('Gemini Vision solve failed');
+    return null;
+  } catch (err) {
+    log(`CAPTCHA Vision error: ${err.message}`);
+    return null;
+  }
+}
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -129,9 +177,19 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   const jobId = state.tabJobs.get(tabId);
   if (!jobId) return;
   const job = state.jobs.get(jobId);
-  if (job?.status === C.JOB_STATUS.NAVIGATING) {
+  if (!job) return;
+
+  // First load: navigate → scraping
+  if (job.status === C.JOB_STATUS.NAVIGATING) {
     updateJob(jobId, { status: C.JOB_STATUS.SCRAPING });
     injectAndScrape(tabId, jobId);
+  }
+  // Page reload during scrape/captcha (e.g. after manual CAPTCHA solve)
+  // content.js auto-extract will fire automatically via its own setTimeout
+  // Just unpause and update status
+  else if (job.status === C.JOB_STATUS.CAPTCHA || job.status === C.JOB_STATUS.SCRAPING) {
+    state.paused = false;
+    broadcastProgress(jobId, 'Page reloaded — extracting results…', Math.max(job.progress, 15));
   }
 });
 
@@ -369,12 +427,28 @@ async function handleContentMessage(msg, tabId, jobId, sendResponse) {
 
   switch (msg.type) {
 
-    case C.MSG.PAGE_READY:
-      log(`[${jobId}] Content script ready on tab ${tabId}`);
-      updateJob(jobId, { status: C.JOB_STATUS.SCRAPING });
-      broadcastProgress(jobId, 'Page loaded. Applying filters…', 8);
+    case C.MSG.PAGE_READY: {
+      log(`[${jobId}] Content script ready on tab ${tabId} — job status: ${job.status}`);
+
+      if (job.status === C.JOB_STATUS.NAVIGATING) {
+        // First load — start the scrape
+        updateJob(jobId, { status: C.JOB_STATUS.SCRAPING });
+        broadcastProgress(jobId, 'Page loaded. Applying filters…', 8);
+        await humanDelay(800, 1200);
+        injectAndScrape(tabId, jobId);
+      } else if (job.status === C.JOB_STATUS.SCRAPING || job.status === C.JOB_STATUS.CAPTCHA) {
+        // Page reloaded (e.g. after CAPTCHA solve) — content.js auto-extract handles it
+        // Just update state and log
+        updateJob(jobId, { status: C.JOB_STATUS.SCRAPING });
+        broadcastProgress(jobId, 'Page reloaded — extracting results…', Math.max(job.progress || 0, 15));
+        log(`[${jobId}] Page reload detected — auto-extract will run`);
+        // Resume paused state if we were waiting for CAPTCHA
+        state.paused = false;
+      }
+
       sendResponse({ ack: true });
       break;
+    }
 
     case C.MSG.CAPTCHA_DETECTED:
       log(`[${jobId}] ⚠️ CAPTCHA detected on tab ${tabId}`);
@@ -485,7 +559,6 @@ async function handleContentMessage(msg, tabId, jobId, sendResponse) {
         95
       );
       if (msg.payload?.allDone) {
-        // Small delay so progress message renders before completion
         setTimeout(() => completeJob(jobId), 600);
       }
       sendResponse({ ack: true });

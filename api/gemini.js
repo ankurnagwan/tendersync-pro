@@ -41,15 +41,22 @@ export default async function handler(req) {
   }
 
   // ── Parse body ─────────────────────────────────────────────────────────────
-  let prompt;
+  let prompt, captchaImage;
   try {
     const body = await req.json();
-    prompt = body?.prompt;
+    prompt       = body?.prompt;
+    captchaImage = body?.captchaImage; // base64 image for CAPTCHA solving
+
+    // CAPTCHA mode — build vision prompt
+    if (captchaImage && !prompt) {
+      prompt = 'This is a CAPTCHA image from an Indian government portal. Read the alphanumeric characters shown. Reply with ONLY those characters — no spaces, no explanation, just the text.';
+    }
+
     if (!prompt || typeof prompt !== 'string') {
       return new Response(JSON.stringify({ error: 'prompt is required' }), { status: 400, headers: corsHeaders });
     }
     if (prompt.length > 12000) {
-      return new Response(JSON.stringify({ error: 'Prompt too long (max 12000 chars)' }), { status: 400, headers: corsHeaders });
+      return new Response(JSON.stringify({ error: 'Prompt too long' }), { status: 400, headers: corsHeaders });
     }
   } catch {
     return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers: corsHeaders });
@@ -64,6 +71,21 @@ export default async function handler(req) {
     );
   }
 
+  // ── Build Gemini request ───────────────────────────────────────────────────
+  let contents;
+  if (captchaImage) {
+    // Vision request — image + text
+    contents = [{
+      parts: [
+        { inline_data: { mime_type: 'image/png', data: captchaImage } },
+        { text: prompt },
+      ]
+    }];
+  } else {
+    // Text-only request
+    contents = [{ parts: [{ text: prompt }] }];
+  }
+
   // ── Call Gemini ─────────────────────────────────────────────────────────────
   try {
     const controller = new AbortController();
@@ -74,12 +96,11 @@ export default async function handler(req) {
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        contents,
         generationConfig: {
-          temperature:     0.3,
-          maxOutputTokens: 2048,
-          topP:            0.8,
-          topK:            40,
+          temperature:     captchaImage ? 0.1 : 0.3,
+          maxOutputTokens: captchaImage ? 32  : 2048,
+          topP: 0.8, topK: 40,
         },
         safetySettings: [
           { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },

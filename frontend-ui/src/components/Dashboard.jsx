@@ -268,51 +268,93 @@ export default function Dashboard() {
           <div style={s.card}>
             <div style={s.cardTitle}>🎯 Scrape Configuration</div>
 
+            {/* Portal selector */}
             <div style={s.field}>
               <label style={s.label}>Portal</label>
               <div style={{ display: 'flex', gap: 6 }}>
-                {['gem', 'tendersontime'].map(p => (
+                {[
+                  { id: 'gem',           label: '🏛️ GeM',  desc: 'gem.gov.in'           },
+                  { id: 'tendersontime', label: '📋 TOT',  desc: 'tendersontime.com'    },
+                ].map(p => (
                   <button
-                    key={p}
-                    style={{ ...s.btn, flex: 1, fontSize: 11, padding: '7px 6px', ...(portal === p ? s.btnPrimary : s.btnGhost) }}
-                    onClick={() => setPortal(p)}
+                    key={p.id}
+                    style={{ ...s.btn, flex: 1, fontSize: 11, padding: '8px 6px',
+                      ...(portal === p.id ? s.btnPrimary : s.btnGhost),
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}
+                    onClick={() => setPortal(p.id)}
                   >
-                    {p === 'gem' ? '🏛️ GeM' : '📋 TOT'}
+                    <span>{p.label}</span>
+                    <span style={{ fontSize: 9, opacity: 0.7 }}>{p.desc}</span>
                   </button>
                 ))}
               </div>
             </div>
 
-            <div style={s.field}>
-              <label style={s.label}>Categories (one per line)</label>
-              <textarea
-                style={{ ...s.input, height: 80, resize: 'vertical' }}
-                value={categories}
-                onChange={e => setCategories(e.target.value)}
-                placeholder="Note Sorting Machines&#10;Office Furniture"
-              />
-            </div>
+            {/* GeM-specific fields */}
+            {portal === 'gem' && (
+              <>
+                <div style={s.field}>
+                  <label style={s.label}>📂 Categories (one per line)</label>
+                  <textarea
+                    style={{ ...s.input, height: 80, resize: 'vertical' }}
+                    value={categories}
+                    onChange={e => setCategories(e.target.value)}
+                    placeholder={'Note Sorting Machines\nOffice Furniture\nLaptop Computers'}
+                  />
+                  <span style={{ fontSize: 9, color: '#475569', marginTop: 3, display: 'block' }}>
+                    Must match GeM category names exactly
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ ...s.field, flex: 1 }}>
+                    <label style={s.label}>From Date</label>
+                    <input style={s.input} type="date" value={fromDate}
+                      onChange={e => setFromDate(e.target.value)} />
+                  </div>
+                  <div style={{ ...s.field, flex: 1 }}>
+                    <label style={s.label}>To Date</label>
+                    <input style={s.input} type="date" value={toDate}
+                      onChange={e => setToDate(e.target.value)} />
+                  </div>
+                </div>
+              </>
+            )}
 
-            <div style={s.field}>
-              <label style={s.label}>Keywords (comma-separated)</label>
-              <input
-                style={s.input}
-                value={keywords}
-                onChange={e => setKeywords(e.target.value)}
-                placeholder="laptop, server, CCTV"
-              />
-            </div>
+            {/* TOT-specific fields */}
+            {portal === 'tendersontime' && (
+              <>
+                <div style={s.field}>
+                  <label style={s.label}>🔍 Search Keywords (one per line)</label>
+                  <textarea
+                    style={{ ...s.input, height: 80, resize: 'vertical' }}
+                    value={keywords}
+                    onChange={e => setKeywords(e.target.value)}
+                    placeholder={'Note Sorting Machine\nCCTV Camera\nLaptop\nServer'}
+                  />
+                  <span style={{ fontSize: 9, color: '#475569', marginTop: 3, display: 'block' }}>
+                    Each keyword = separate search run
+                  </span>
+                </div>
+                <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
+                  borderRadius: 6, padding: '8px 10px', fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>
+                  <span style={{ color: '#fbbf24', fontWeight: 700 }}>ℹ️ TOT Note: </span>
+                  Free public tenders only. Login on tendersontime.com first for full document access.
+                </div>
+              </>
+            )}
 
-            <div style={{ display: 'flex', gap: 8 }}>
-              <div style={{ ...s.field, flex: 1 }}>
-                <label style={s.label}>From Date</label>
-                <input style={s.input} type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} />
+            {/* Shared keywords for GeM */}
+            {portal === 'gem' && (
+              <div style={s.field}>
+                <label style={s.label}>Filter Keywords (optional)</label>
+                <input
+                  style={s.input}
+                  value={keywords}
+                  onChange={e => setKeywords(e.target.value)}
+                  placeholder="laptop, server, CCTV (filters results)"
+                />
               </div>
-              <div style={{ ...s.field, flex: 1 }}>
-                <label style={s.label}>To Date</label>
-                <input style={s.input} type="date" value={toDate} onChange={e => setToDate(e.target.value)} />
-              </div>
-            </div>
+            )}
 
             <div style={{ display: 'flex', gap: 6 }}>
               <button
@@ -320,7 +362,7 @@ export default function Dashboard() {
                 onClick={handleStartScrape}
                 disabled={!ext.connected}
               >
-                🚀 Start Scrape
+                🚀 Start {portal === 'gem' ? 'GeM' : 'TOT'} Scrape
               </button>
               {ext.jobs.some(j => !['DONE','FAILED'].includes(j.status)) && (
                 <button style={{ ...s.btn, ...s.btnDanger }} onClick={() => ext.stopScrape()}>

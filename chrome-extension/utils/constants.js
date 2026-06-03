@@ -16,8 +16,8 @@ const GEM_CONSTANTS = {
     GEM_CONTRACTS:  'https://gem.gov.in/view_contracts',
     GEM_BIDS:       'https://gem.gov.in/bids',
     GEM_LOGIN:      'https://gem.gov.in/',
-    TOT_SEARCH:     'https://tendersontime.com/tenders',
-    TOT_LOGIN:      'https://tendersontime.com/login',
+    TOT_SEARCH:     'https://www.tendersontime.com/tenders/',
+    TOT_LOGIN:      'https://www.tendersontime.com/login',
   },
 
   // ── Job status lifecycle ───────────────────────────────────────────────────
