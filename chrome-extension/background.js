@@ -63,6 +63,33 @@ chrome.alarms.onAlarm.addListener(alarm => {
   }
 });
 
+// ── STRONGER KEEPALIVE — runs every 20s regardless of running state ──────────
+// This prevents SW death during CAPTCHA solving (which can take 60+ seconds)
+setInterval(() => {
+  chrome.storage.session.set({ swAlive: Date.now() });
+}, 20000);
+
+// Persist tabJobs to storage so they survive SW restarts
+function persistTabJobs() {
+  const obj = {};
+  state.tabJobs.forEach((jobId, tabId) => { obj[`tj_${tabId}`] = jobId; });
+  state.jobTabs.forEach((tabId, jobId) => { obj[`jt_${jobId}`] = tabId; });
+  chrome.storage.session.set({ tabJobsMap: obj }).catch(() => {});
+}
+
+// Restore tabJobs from storage after SW restart
+async function restoreTabJobs() {
+  try {
+    const stored = await chrome.storage.session.get('tabJobsMap');
+    const map = stored?.tabJobsMap || {};
+    Object.entries(map).forEach(([key, val]) => {
+      if (key.startsWith('tj_')) state.tabJobs.set(Number(key.slice(3)), val);
+      if (key.startsWith('jt_')) state.jobTabs.set(val, Number(key.slice(3)));
+    });
+    if (state.tabJobs.size > 0) log(`Restored ${state.tabJobs.size} tab→job mappings from storage`);
+  } catch {}
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // REACT DASHBOARD CONNECTIONS (externally_connectable long-lived ports)
@@ -101,7 +128,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
   if (!tabId) return;
 
-  // ── CAPTCHA Vision solve — doesn't need a job ID ─────────────────────────
+  // ── CAPTCHA Vision solve ──────────────────────────────────────────────────
   if (msg.type === 'SOLVE_CAPTCHA_IMAGE') {
     solveCaptchaWithGemini(msg.payload?.base64).then(text => {
       sendResponse({ text: text || null });
@@ -109,12 +136,96 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  const jobId = state.tabJobs.get(tabId);
-  if (!jobId) return;
+  // ── Try to find jobId for this tab ────────────────────────────────────────
+  let jobId = state.tabJobs.get(tabId);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // CRITICAL FIX: Service worker was restarted (killed during CAPTCHA wait)
+  // and lost all state. We have no jobId but we MUST still deliver the data.
+  // Solution: broadcast directly to all connected React ports — bypass job tracking.
+  // ══════════════════════════════════════════════════════════════════════════
+  if (!jobId) {
+    log(`SW state lost for tab ${tabId} — broadcasting directly to React ports`);
+
+    if (msg.type === C.MSG.DATA_EXTRACTED) {
+      const tenders = msg.payload?.tenders || [];
+      const newTenders = tenders.filter(t => t?.bidId && !state.seenBidIds.has(t.bidId));
+      newTenders.forEach(t => state.seenBidIds.add(t.bidId));
+
+      // Stream every tender directly to React
+      (async () => {
+        for (const tender of newTenders) {
+          broadcast({ type: C.MSG.STREAM_TENDER, payload: tender });
+          await new Promise(r => setTimeout(r, 80));
+        }
+        broadcast({
+          type: C.MSG.STREAM_PROGRESS,
+          payload: {
+            jobId: 'recovered',
+            message: `✅ ${newTenders.length} contracts received`,
+            progress: 90,
+            status: 'SCRAPING',
+            totalFound: newTenders.length,
+            downloaded: 0,
+            failed: 0,
+          },
+        });
+      })();
+
+      sendResponse({ received: newTenders.length, fallback: true });
+      return true;
+    }
+
+    if (msg.type === C.MSG.NAVIGATION_DONE) {
+      const total = msg.payload?.totalExtracted || 0;
+      broadcast({
+        type: C.MSG.SCRAPE_COMPLETE,
+        payload: { jobId: 'recovered', totalFound: total, downloaded: 0, failed: 0, duration: 0 },
+      });
+      broadcast({
+        type: C.MSG.STREAM_LOG,
+        payload: { level: 'success', message: `🎉 Scrape complete — ${total} contracts captured` },
+      });
+      sendResponse({ ack: true });
+      return true;
+    }
+
+    if (msg.type === C.MSG.PAGE_READY) {
+      sendResponse({ ack: true });
+      return true;
+    }
+
+    if (msg.type === 'STREAM_LOG') {
+      broadcast({ type: C.MSG.STREAM_LOG, payload: msg.payload });
+      sendResponse({ ack: true });
+      return true;
+    }
+
+    if (msg.type === C.MSG.CAPTCHA_DETECTED) {
+      state.paused = true;
+      broadcast({ type: C.MSG.STREAM_LOG, payload: { level: 'warn', message: '🔐 CAPTCHA detected — please solve it in the GeM tab' } });
+      broadcast({ type: C.MSG.STREAM_PROGRESS, payload: { jobId: 'recovered', message: '🔐 Waiting for CAPTCHA…', progress: 10, status: 'CAPTCHA_WAIT' } });
+      sendResponse({ waiting: true });
+      return true;
+    }
+
+    if (msg.type === C.MSG.CAPTCHA_SOLVED) {
+      state.paused = false;
+      broadcast({ type: C.MSG.STREAM_LOG, payload: { level: 'success', message: '✅ CAPTCHA solved — extracting contracts…' } });
+      broadcast({ type: C.MSG.STREAM_PROGRESS, payload: { jobId: 'recovered', message: '✅ CAPTCHA solved — scraping…', progress: 20, status: 'SCRAPING' } });
+      sendResponse({ resume: true });
+      return true;
+    }
+
+    sendResponse({ noJob: true });
+    return true;
+  }
+
+  // Normal path — jobId found
   handleContentMessage(msg, tabId, jobId, sendResponse);
   return true;
 });
+
 
 // ── Gemini Vision CAPTCHA solver ─────────────────────────────────────────────
 async function solveCaptchaWithGemini(base64Image) {
@@ -622,7 +733,6 @@ function handleDashboardMessage(msg, port) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function openOrReuseTab(url, jobId) {
-  // Check if there's already a tab for this job
   const existingTabId = state.jobTabs.get(jobId);
   if (existingTabId) {
     try {
@@ -634,6 +744,7 @@ async function openOrReuseTab(url, jobId) {
   const tab = await chrome.tabs.create({ url, active: false });
   state.tabJobs.set(tab.id, jobId);
   state.jobTabs.set(jobId, tab.id);
+  persistTabJobs(); // ← save immediately so SW restart can recover
   return tab.id;
 }
 
@@ -736,6 +847,9 @@ function log(msg) {
   const manifest = chrome.runtime.getManifest();
   log(`Extension: ${manifest.name} v${manifest.version}`);
 
+  // Restore tab→job mappings from previous SW session
+  await restoreTabJobs();
+
   // Restore any in-progress sessions from storage (SW restart recovery)
   const stored = await chrome.storage.session.get(null);
   const savedJobs = Object.entries(stored)
@@ -744,7 +858,6 @@ function log(msg) {
 
   if (savedJobs.length > 0) {
     log(`Recovered ${savedJobs.length} job(s) from storage`);
-    // Mark previously running jobs as failed (SW was killed mid-run)
     for (const j of savedJobs) {
       if (!['DONE', 'FAILED'].includes(j.status)) {
         state.jobs.set(j.id, { ...j, status: C.JOB_STATUS.FAILED, errors: ['Service worker restarted'] });
