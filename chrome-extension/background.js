@@ -58,7 +58,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === state.KEEPALIVE_ALARM) {
     // Touch storage to keep SW alive during active runs
     if (state.running.size > 0) {
-      chrome.storage.session.set({ keepalive: Date.now() });
+      chrome.storage.local.set({ keepalive: Date.now() });
     }
   }
 });
@@ -66,7 +66,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
 // ── STRONGER KEEPALIVE — runs every 20s regardless of running state ──────────
 // This prevents SW death during CAPTCHA solving (which can take 60+ seconds)
 setInterval(() => {
-  chrome.storage.session.set({ swAlive: Date.now() });
+  chrome.storage.local.set({ swAlive: Date.now() });
 }, 20000);
 
 // Persist tabJobs to storage so they survive SW restarts
@@ -74,13 +74,13 @@ function persistTabJobs() {
   const obj = {};
   state.tabJobs.forEach((jobId, tabId) => { obj[`tj_${tabId}`] = jobId; });
   state.jobTabs.forEach((tabId, jobId) => { obj[`jt_${jobId}`] = tabId; });
-  chrome.storage.session.set({ tabJobsMap: obj }).catch(() => {});
+  chrome.storage.local.set({ tabJobsMap: obj }).catch(() => {});
 }
 
 // Restore tabJobs from storage after SW restart
 async function restoreTabJobs() {
   try {
-    const stored = await chrome.storage.session.get('tabJobsMap');
+    const stored = await chrome.storage.local.get('tabJobsMap');
     const map = stored?.tabJobsMap || {};
     Object.entries(map).forEach(([key, val]) => {
       if (key.startsWith('tj_')) state.tabJobs.set(Number(key.slice(3)), val);
@@ -850,7 +850,7 @@ function updateJob(jobId, patch) {
   if (!job) return;
   Object.assign(job, patch);
   // Persist to storage for popup access
-  chrome.storage.session.set({ [`job_${jobId}`]: {
+  chrome.storage.local.set({ [`job_${jobId}`]: {
     id: job.id, portal: job.portal, status: job.status,
     progress: job.progress, totalFound: job.totalFound,
     downloaded: job.downloaded, failed: job.failed,
@@ -891,7 +891,7 @@ function log(msg) {
   await restoreTabJobs();
 
   // Restore any in-progress sessions from storage (SW restart recovery)
-  const stored = await chrome.storage.session.get(null);
+  const stored = await chrome.storage.local.get(null);
   const savedJobs = Object.entries(stored)
     .filter(([k]) => k.startsWith('job_'))
     .map(([, v]) => v);
