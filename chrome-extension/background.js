@@ -128,6 +128,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab?.id;
   if (!tabId) return;
 
+  // ── Credential management ─────────────────────────────────────────────────
+  if (msg.type === 'SAVE_CREDENTIALS') {
+    const { portal, username, password } = msg.payload || {};
+    if (portal && username) {
+      chrome.storage.local.set({ [`creds_${portal}`]: { username, password } }, () => {
+        sendResponse({ saved: true });
+        log(`Credentials saved for ${portal}`);
+      });
+    }
+    return true;
+  }
+
+  if (msg.type === 'GET_CREDENTIALS') {
+    const { portal } = msg.payload || {};
+    chrome.storage.local.get(`creds_${portal}`, data => {
+      sendResponse({ creds: data[`creds_${portal}`] || null });
+    });
+    return true;
+  }
+
+  if (msg.type === 'CLEAR_CREDENTIALS') {
+    const { portal } = msg.payload || {};
+    chrome.storage.local.remove(`creds_${portal}`, () => {
+      sendResponse({ cleared: true });
+    });
+    return true;
+  }
+
   // ── CAPTCHA Vision solve ──────────────────────────────────────────────────
   if (msg.type === 'SOLVE_CAPTCHA_IMAGE') {
     solveCaptchaWithGemini(msg.payload?.base64).then(text => {
@@ -415,7 +443,19 @@ async function startJob(jobId) {
   broadcastProgress(jobId, `Starting ${job.portal.toUpperCase()} scrape…`, 2);
 
   try {
-    const url = job.portal === C.PORTALS.GEM ? C.URLS.GEM_CONTRACTS : C.URLS.TOT_SEARCH;
+    // Route to correct portal URL
+    let url;
+    if (job.portal === 'gem') {
+      url = C.URLS.GEM_BIDS; // bidplus.gem.gov.in/all-bids — NO CAPTCHA
+    } else if (job.portal === 'tendersontime') {
+      url = C.URLS.TOT_SEARCH;
+    } else if (job.portal === 'tender247') {
+      // Build keyword URL: /keyword/note+sorting+machine+tenders
+      const kw = (job.keywords?.[0] || '').trim().replace(/\s+/g, '+');
+      url = kw ? `${C.URLS.T247_BASE}${kw}+tenders` : C.URLS.T247_BASE;
+    } else {
+      url = C.URLS.GEM_BIDS;
+    }
     const tabId = await openOrReuseTab(url, jobId);
 
     updateJob(jobId, { status: C.JOB_STATUS.NAVIGATING });

@@ -10,7 +10,7 @@
  *  - AI report modal (Gemini Pro integration)
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   BarChart, Bar, PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   XAxis, YAxis, CartesianGrid
@@ -78,6 +78,64 @@ const STAGES = [
 const CHART_COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#ec4899'];
 
 // ── Main Component ─────────────────────────────────────────────────────────────
+// ── CredentialRow component ───────────────────────────────────────────────────
+function CredentialRow({ portal, label }) {
+  const [user, setUser]         = React.useState('');
+  const [pass, setPass]         = React.useState('');
+  const [saved, setSaved]       = React.useState(false);
+  const [expanded, setExpanded] = React.useState(false);
+
+  React.useEffect(() => {
+    if (typeof chrome === 'undefined' || !chrome?.runtime) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'GET_CREDENTIALS', payload: { portal } }, resp => {
+        if (chrome.runtime.lastError) return;
+        if (resp?.creds?.username) { setUser(resp.creds.username); setPass(resp.creds.password || ''); setSaved(true); }
+      });
+    } catch {}
+  }, [portal]);
+
+  const save = () => {
+    if (!user.trim()) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'SAVE_CREDENTIALS', payload: { portal, username: user.trim(), password: pass } }, () => {
+        setSaved(true); setExpanded(false);
+      });
+    } catch {}
+  };
+
+  const clear = () => {
+    try {
+      chrome.runtime.sendMessage({ type: 'CLEAR_CREDENTIALS', payload: { portal } }, () => {
+        setUser(''); setPass(''); setSaved(false);
+      });
+    } catch {}
+  };
+
+  const iStyle = { width:'100%', background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', borderRadius:5, padding:'5px 8px', color:'#f8fafc', fontSize:11, outline:'none', marginTop:3, fontFamily:'inherit', boxSizing:'border-box' };
+
+  return (
+    <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid rgba(255,255,255,0.07)', borderRadius:6, padding:'8px 10px', marginBottom:6 }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', cursor:'pointer' }} onClick={() => setExpanded(e => !e)}>
+        <span style={{ fontSize:11, color: saved ? '#4ade80' : '#94a3b8' }}>{saved ? '✅' : '○'} {label}</span>
+        <span style={{ fontSize:10, color:'#475569' }}>{expanded ? '▲' : (saved ? 'change ▼' : 'add ▼')}</span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop:8 }}>
+          <div style={{ fontSize:9, color:'#475569' }}>USERNAME / EMAIL</div>
+          <input style={iStyle} value={user} onChange={e => setUser(e.target.value)} placeholder="your@email.com" autoComplete="off" />
+          <div style={{ fontSize:9, color:'#475569', marginTop:6 }}>PASSWORD</div>
+          <input style={iStyle} type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="••••••••" />
+          <div style={{ display:'flex', gap:6, marginTop:8 }}>
+            <button onClick={save} style={{ flex:1, padding:'5px', background:'#1d4ed8', color:'white', border:'none', borderRadius:5, fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>💾 Save</button>
+            {saved && <button onClick={clear} style={{ padding:'5px 8px', background:'rgba(239,68,68,0.1)', color:'#ef4444', border:'1px solid rgba(239,68,68,0.3)', borderRadius:5, fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>Clear</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   // Extension connection
   const [extId, setExtId]         = useState('');
@@ -88,7 +146,8 @@ export default function Dashboard() {
   // Scrape config form
   const [portal, setPortal]       = useState('gem');
   const [categories, setCategories] = useState('Note Sorting Machines');
-  const [keywords, setKeywords]   = useState('');
+  const [keywords, setKeywords]       = useState('');
+  const [totKeywords, setTotKeywords] = useState('');
   const [fromDate, setFromDate]   = useState('');
   const [toDate, setToDate]       = useState('');
 
@@ -160,13 +219,27 @@ export default function Dashboard() {
   // ── Start scrape ─────────────────────────────────────────────────────────────
   const handleStartScrape = () => {
     if (!ext.connected) { ext.addLog('error', 'Connect the extension first.'); return; }
-    const config = {
-      portal,
-      categories: categories.split('\n').map(s => s.trim()).filter(Boolean),
-      keywords:   keywords.split(',').map(s => s.trim()).filter(Boolean),
-      fromDate,
-      toDate,
-    };
+
+    let config;
+    if (portal === 'gem') {
+      config = {
+        portal,
+        categories: categories.split('\n').map(s => s.trim()).filter(Boolean),
+        keywords:   keywords.split(',').map(s => s.trim()).filter(Boolean),
+        fromDate,
+        toDate,
+      };
+    } else {
+      // TOT: keywords one per line, no categories, no date
+      config = {
+        portal,
+        categories: [],
+        keywords: totKeywords.split('\n').map(s => s.trim()).filter(Boolean),
+        fromDate: '',
+        toDate: '',
+      };
+    }
+
     ext.startScrape(config);
     setActiveTab('run');
   };
@@ -268,108 +341,102 @@ export default function Dashboard() {
           <div style={s.card}>
             <div style={s.cardTitle}>🎯 Scrape Configuration</div>
 
-            {/* Portal selector */}
+            {/* 3 Portal buttons */}
             <div style={s.field}>
               <label style={s.label}>Portal</label>
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ display:'flex', gap:4 }}>
                 {[
-                  { id: 'gem',           label: '🏛️ GeM',  desc: 'gem.gov.in'           },
-                  { id: 'tendersontime', label: '📋 TOT',  desc: 'tendersontime.com'    },
+                  { id:'gem',           label:'🏛️ GeM',  sub:'bidplus.gem.gov.in' },
+                  { id:'tendersontime', label:'📋 TOT',  sub:'tendersontime.com'  },
+                  { id:'tender247',     label:'🔍 T247', sub:'tender247.com'      },
                 ].map(p => (
-                  <button
-                    key={p.id}
-                    style={{ ...s.btn, flex: 1, fontSize: 11, padding: '8px 6px',
-                      ...(portal === p.id ? s.btnPrimary : s.btnGhost),
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}
-                    onClick={() => setPortal(p.id)}
-                  >
-                    <span>{p.label}</span>
-                    <span style={{ fontSize: 9, opacity: 0.7 }}>{p.desc}</span>
+                  <button key={p.id}
+                    style={{ ...s.btn, flex:1, fontSize:10, padding:'7px 4px',
+                      ...(portal===p.id ? s.btnPrimary : s.btnGhost),
+                      display:'flex', flexDirection:'column', alignItems:'center', gap:1 }}
+                    onClick={() => setPortal(p.id)}>
+                    <span style={{ fontSize:12 }}>{p.label}</span>
+                    <span style={{ fontSize:8, opacity:0.6 }}>{p.sub}</span>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* GeM-specific fields */}
-            {portal === 'gem' && (
-              <>
-                <div style={s.field}>
-                  <label style={s.label}>📂 Categories (one per line)</label>
-                  <textarea
-                    style={{ ...s.input, height: 80, resize: 'vertical' }}
-                    value={categories}
-                    onChange={e => setCategories(e.target.value)}
-                    placeholder={'Note Sorting Machines\nOffice Furniture\nLaptop Computers'}
-                  />
-                  <span style={{ fontSize: 9, color: '#475569', marginTop: 3, display: 'block' }}>
-                    Must match GeM category names exactly
-                  </span>
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <div style={{ ...s.field, flex: 1 }}>
-                    <label style={s.label}>From Date</label>
-                    <input style={s.input} type="date" value={fromDate}
-                      onChange={e => setFromDate(e.target.value)} />
-                  </div>
-                  <div style={{ ...s.field, flex: 1 }}>
-                    <label style={s.label}>To Date</label>
-                    <input style={s.input} type="date" value={toDate}
-                      onChange={e => setToDate(e.target.value)} />
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* TOT-specific fields */}
-            {portal === 'tendersontime' && (
-              <>
-                <div style={s.field}>
-                  <label style={s.label}>🔍 Search Keywords (one per line)</label>
-                  <textarea
-                    style={{ ...s.input, height: 80, resize: 'vertical' }}
-                    value={keywords}
-                    onChange={e => setKeywords(e.target.value)}
-                    placeholder={'Note Sorting Machine\nCCTV Camera\nLaptop\nServer'}
-                  />
-                  <span style={{ fontSize: 9, color: '#475569', marginTop: 3, display: 'block' }}>
-                    Each keyword = separate search run
-                  </span>
-                </div>
-                <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
-                  borderRadius: 6, padding: '8px 10px', fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>
-                  <span style={{ color: '#fbbf24', fontWeight: 700 }}>ℹ️ TOT Note: </span>
-                  Free public tenders only. Login on tendersontime.com first for full document access.
-                </div>
-              </>
-            )}
-
-            {/* Shared keywords for GeM */}
-            {portal === 'gem' && (
+            {/* GeM fields */}
+            {portal === 'gem' && (<>
               <div style={s.field}>
-                <label style={s.label}>Filter Keywords (optional)</label>
-                <input
-                  style={s.input}
-                  value={keywords}
-                  onChange={e => setKeywords(e.target.value)}
-                  placeholder="laptop, server, CCTV (filters results)"
-                />
+                <label style={s.label}>📂 Keywords / Category</label>
+                <textarea style={{ ...s.input, height:70, resize:'vertical' }}
+                  value={categories} onChange={e => setCategories(e.target.value)}
+                  placeholder={'Note Sorting Machines\nLaptop\nCCTV Camera'} />
+                <span style={{ fontSize:9, color:'#22c55e', marginTop:2, display:'block' }}>
+                  ✅ No CAPTCHA — searches bidplus.gem.gov.in/all-bids
+                </span>
               </div>
-            )}
+              <div style={{ display:'flex', gap:6 }}>
+                <div style={{ ...s.field, flex:1 }}>
+                  <label style={s.label}>From</label>
+                  <input style={s.input} type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} />
+                </div>
+                <div style={{ ...s.field, flex:1 }}>
+                  <label style={s.label}>To</label>
+                  <input style={s.input} type="date" value={toDate} onChange={e => setToDate(e.target.value)} />
+                </div>
+              </div>
+            </>)}
 
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                style={{ ...s.btn, ...s.btnPrimary, flex: 1 }}
-                onClick={handleStartScrape}
-                disabled={!ext.connected}
-              >
-                🚀 Start {portal === 'gem' ? 'GeM' : 'TOT'} Scrape
+            {/* TOT fields */}
+            {portal === 'tendersontime' && (<>
+              <div style={s.field}>
+                <label style={s.label}>🔍 Keywords (one per line)</label>
+                <textarea style={{ ...s.input, height:80, resize:'vertical' }}
+                  value={totKeywords} onChange={e => setTotKeywords(e.target.value)}
+                  placeholder={'CCTV Camera\nNote Sorting Machine\nLaptop'} />
+              </div>
+              <div style={{ background:'rgba(245,158,11,0.08)', border:'1px solid rgba(245,158,11,0.2)',
+                borderRadius:6, padding:'7px 10px', fontSize:10, color:'#94a3b8', marginBottom:8 }}>
+                Login to TOT first for full results. Free tenders shown without login.
+              </div>
+            </>)}
+
+            {/* Tender247 fields */}
+            {portal === 'tender247' && (<>
+              <div style={s.field}>
+                <label style={s.label}>🔍 Keywords (one per line)</label>
+                <textarea style={{ ...s.input, height:80, resize:'vertical' }}
+                  value={totKeywords} onChange={e => setTotKeywords(e.target.value)}
+                  placeholder={'cctv system\nnote sorting machine\nlaptop'} />
+                <span style={{ fontSize:9, color:'#475569', marginTop:2, display:'block' }}>
+                  Opens tender247.com/keyword/[keyword]+tenders
+                </span>
+              </div>
+            </>)}
+
+            {/* Start / Stop */}
+            <div style={{ display:'flex', gap:6 }}>
+              <button style={{ ...s.btn, ...s.btnPrimary, flex:1 }}
+                onClick={handleStartScrape} disabled={!ext.connected}>
+                🚀 Start {portal==='gem' ? 'GeM' : portal==='tendersontime' ? 'TOT' : 'T247'} Scrape
               </button>
               {ext.jobs.some(j => !['DONE','FAILED'].includes(j.status)) && (
-                <button style={{ ...s.btn, ...s.btnDanger }} onClick={() => ext.stopScrape()}>
-                  ⏹
-                </button>
+                <button style={{ ...s.btn, ...s.btnDanger }} onClick={() => ext.stopScrape()}>⏹</button>
               )}
             </div>
+          </div>
+
+          {/* Credentials Manager */}
+          <div style={s.card}>
+            <div style={s.cardTitle}>🔐 Login Credentials</div>
+            <div style={{ fontSize:10, color:'#475569', marginBottom:8 }}>
+              Auto-filled on login pages. Stored locally, never sent anywhere.
+            </div>
+            {[
+              { id:'gem',           label:'GeM Portal'    },
+              { id:'tendersontime', label:'TendersOnTime' },
+              { id:'tender247',     label:'Tender247'     },
+            ].map(p => (
+              <CredentialRow key={p.id} portal={p.id} label={p.label} />
+            ))}
           </div>
 
           {/* Export Controls */}
