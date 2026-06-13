@@ -1,32 +1,41 @@
 /**
- * popup.js — GeM Aggregator Extension Popup
+ * popup.js — TenderSync Pro Engine Control System
  * ==========================================
- * Connects to the background service worker and renders live job status,
- * metrics, and log stream. Provides quick-access controls.
+ * Hooks input configuration directly to background service operations.
+ * Handles Play/Pause/Stop control states, dynamic form rendering,
+ * real-time runtime logging, and operational telemetry.
  */
 
 (() => {
   'use strict';
 
-  // ── Config ─────────────────────────────────────────────────────────────────
-  const DASHBOARD_URL = 'https://gem-aggregator.vercel.app'; // Update after deploy
   const MAX_LOG_LINES = 30;
 
-  // ── DOM refs ───────────────────────────────────────────────────────────────
+  // ── DOM References ─────────────────────────────────────────────────────────
   const $ = id => document.getElementById(id);
-  const connDot      = $('conn-dot');
-  const connLabel    = $('conn-label');
-  const jobsList     = $('jobs-list');
-  const logBox       = $('log-box');
-  const mFound       = $('m-found');
-  const mDone        = $('m-done');
-  const mFail        = $('m-fail');
-  const extIdVal     = $('ext-id-val');
-  const copyIdBtn    = $('copy-id-btn');
-  const openDashBtn  = $('open-dashboard-btn');
-  const stopAllBtn   = $('stop-all-btn');
+  
+  const connDot        = $('conn-dot');
+  const connLabel      = $('conn-label');
+  const logBox         = $('log-box');
+  const mFound         = $('m-found');
+  const mDone          = $('m-done');
+  const mFail          = $('m-fail');
+  const extIdVal       = $('ext-id-val');
+  const copyIdBtn      = $('copy-id-btn');
+  
+  // Parameter Controls
+  const portalSelect   = $('portal-select');
+  const txtKeywords    = $('txt-keywords');
+  const dateStart      = $('date-start');
+  const dateEnd        = $('date-end');
+  const dateRangeBlock = $('date-range-block');
 
-  // ── Extension ID ───────────────────────────────────────────────────────────
+  // Action Buttons
+  const btnStart       = $('btn-start');
+  const btnPause       = $('btn-pause');
+  const btnStop        = $('btn-stop');
+
+  // ── Connection Initialization ──────────────────────────────────────────────
   const EXT_ID = chrome.runtime.id;
   extIdVal.textContent = EXT_ID;
 
@@ -37,97 +46,137 @@
     });
   });
 
-  // ── Open dashboard tab ─────────────────────────────────────────────────────
-  openDashBtn.addEventListener('click', () => {
-    chrome.tabs.create({ url: DASHBOARD_URL });
-  });
-
-  // ── Request status from background ────────────────────────────────────────
-  function requestStatus() {
-    chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (resp) => {
-      if (chrome.runtime.lastError || !resp) {
-        setConnected(false, 'Background unavailable');
-        return;
-      }
-      setConnected(true, `${resp.running} job(s) running`);
-      renderJobs(resp.jobs || []);
-      renderMetrics(resp.jobs || []);
-    });
-  }
-
-  // ── Listen for streamed messages from background ───────────────────────────
-  chrome.runtime.onMessage.addListener((msg) => {
-    switch (msg.type) {
-      case 'STREAM_LOG':
-        appendLog(msg.payload?.message, msg.payload?.level);
-        break;
-      case 'STREAM_PROGRESS':
-        updateJobProgress(msg.payload);
-        break;
-      case 'STATUS_UPDATE':
-        renderJobs(msg.payload?.jobs || []);
-        renderMetrics(msg.payload?.jobs || []);
-        break;
+  // ── Dynamic Form UI Controls ───────────────────────────────────────────────
+  portalSelect.addEventListener('change', (e) => {
+    const portal = e.target.value;
+    // Show dates for GeM and TendersOnTime, hide for Tender247 keyword hub
+    if (portal === 'gem' || portal === 'tendersontime') {
+      dateRangeBlock.style.display = 'flex';
+    } else {
+      dateRangeBlock.style.display = 'none';
     }
   });
 
-  // ── Stop all ───────────────────────────────────────────────────────────────
-  stopAllBtn.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'STOP_SCRAPE', payload: {} });
-    appendLog('⏹️ Stop signal sent', 'warn');
-  });
+  // ── Core Communication Port Link ───────────────────────────────────────────
+  let dashboardPort = null;
 
-  // ── Render helpers ─────────────────────────────────────────────────────────
-  function setConnected(ok, label) {
-    connDot.className = `conn-dot${ok ? ' connected' : ''}`;
-    connLabel.textContent = ok ? `✓ ${label}` : `✗ ${label}`;
-    connLabel.style.color = ok ? '#22c55e' : '#ef4444';
+  function connectToEngine() {
+    dashboardPort = chrome.runtime.connect({ name: 'gem-dashboard' });
+    
+    dashboardPort.onMessage.addListener((msg) => {
+      switch (msg.type) {
+        case 'STATUS_UPDATE':
+          handleSystemStatus(msg.payload);
+          break;
+        case 'STREAM_LOG':
+          appendLog(msg.payload?.message, msg.payload?.level);
+          break;
+        case 'STREAM_TENDER':
+          appendLog(`[Data] Found matching item: ${msg.payload?.bidId || 'ID Target'}`, 'success');
+          break;
+        case 'SCRAPE_COMPLETE':
+          appendLog(`🏁 Scrape Finished: ${msg.payload?.totalFound || 0} items parsed.`, 'success');
+          resetInterfaceState();
+          break;
+      }
+    });
+
+    dashboardPort.onDisconnect.addListener(() => {
+      setConnectedState(false, 'Engine Disconnected');
+      // Re-attempt background registration safely after context dropout
+      setTimeout(connectToEngine, 2000);
+    });
+
+    // Request fresh status tracking layout upon connect
+    dashboardPort.postMessage({ type: 'GET_STATUS' });
   }
 
-  function renderJobs(jobs) {
-    if (!jobs.length) {
-      jobsList.innerHTML = `<div class="no-jobs"><span class="emoji">💤</span>No active jobs. Open your dashboard to start.</div>`;
+  // ── Action Button Event Binding Interceptors ────────────────────────────────
+  btnStart.addEventListener('click', () => {
+    const keywordsArray = txtKeywords.value.split(',').map(k => k.trim()).filter(k => k.length > 0);
+    
+    const payload = {
+      portal: portalSelect.value,
+      keywords: keywordsArray.length > 0 ? keywordsArray : ['latest'],
+      fromDate: dateStart.value || '',
+      toDate: dateEnd.value || ''
+    };
+
+    dashboardPort.postMessage({ type: 'START_SCRAPE', payload: payload });
+    
+    appendLog(`🚀 Spawned Job Thread [${payload.portal.toUpperCase()}] for keywords: ${payload.keywords.join(', ')}`, 'info');
+    
+    // Toggle Button View UI states directly inside popup context
+    setControlButtons('RUNNING');
+  });
+
+  btnPause.addEventListener('click', () => {
+    // Target back-end configuration tracking
+    chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (resp) => {
+      const currentlyPaused = resp?.paused || false;
+      // Mirror state changes upstream
+      chrome.storage.local.set({ _pausedState: !currentlyPaused });
+      appendLog(currentlyPaused ? '▶️ Resuming task stream...' : '⏸️ Pausing execution pipelines...', 'warn');
+      btnPause.innerHTML = currentlyPaused ? 
+        `<svg width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg> Pause` :
+        `<svg width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg> Resume`;
+    });
+  });
+
+  btnStop.addEventListener('click', () => {
+    dashboardPort.postMessage({ type: 'STOP_SCRAPE' });
+    appendLog('⏹️ Sent structural terminate signal down thread pool.', 'error');
+    resetInterfaceState();
+  });
+
+  // ── Status & Telemetry Handling Transformers ─────────────────────────────
+  function handleSystemStatus(payload) {
+    if (!payload) return;
+
+    const isRunning = (payload.running || 0) > 0;
+    
+    if (payload.paused) {
+      setConnectedState(true, 'Engine Paused', 'paused');
+    } else if (isRunning) {
+      setConnectedState(true, `Worker Active (${payload.running} running)`, 'connected');
+      setControlButtons('RUNNING');
+    } else {
+      setConnectedState(true, 'Engine Ready', 'connected');
+    }
+
+    // Capture telemetry counters safely without array maps loops errors
+    mFound.textContent = payload.totalFound || '0';
+    mDone.textContent  = payload.downloaded || '0';
+    mFail.textContent  = payload.failed || '0';
+  }
+
+  function setConnectedState(ok, text, stateClass = 'connected') {
+    if (!ok) {
+      connDot.className = 'conn-dot';
+      connLabel.textContent = `✗ ${text}`;
+      connLabel.style.color = '#ef4444';
       return;
     }
-
-    jobsList.innerHTML = jobs.map(j => `
-      <div class="job-item" id="job-${j.id}">
-        <div class="job-top">
-          <span class="job-portal ${j.portal}">${j.portal === 'gem' ? 'GeM' : 'TOT'}</span>
-          <span style="color:#94a3b8;font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-            ${statusIcon(j.status)} ${j.status}
-          </span>
-          <span class="job-status ${statusClass(j.status)}">${j.progress || 0}%</span>
-        </div>
-        <div class="job-progress">
-          <div class="job-progress-bar" style="width:${j.progress || 0}%"></div>
-        </div>
-        <div class="job-stats">
-          <span>Found: <b>${j.totalFound || 0}</b></span>
-          <span>DL: <b>${j.downloaded || 0}</b></span>
-          <span>Fail: <b>${j.failed || 0}</b></span>
-        </div>
-      </div>
-    `).join('');
+    connDot.className = `conn-dot ${stateClass}`;
+    connLabel.textContent = `✓ ${text}`;
+    connLabel.style.color = stateClass === 'paused' ? '#f59e0b' : '#22c55e';
   }
 
-  function updateJobProgress(payload) {
-    const el = document.getElementById(`job-${payload?.jobId}`);
-    if (!el) { requestStatus(); return; }
-
-    const bar = el.querySelector('.job-progress-bar');
-    const pct = el.querySelector('.job-status');
-    if (bar) bar.style.width = `${payload.progress || 0}%`;
-    if (pct) pct.textContent = `${payload.progress || 0}%`;
+  function setControlButtons(state) {
+    if (state === 'RUNNING') {
+      btnStart.disabled = true;
+      btnPause.disabled = false;
+      btnStop.disabled = false;
+    } else {
+      resetInterfaceState();
+    }
   }
 
-  function renderMetrics(jobs) {
-    const totalFound = jobs.reduce((s, j) => s + (j.totalFound || 0), 0);
-    const totalDone  = jobs.reduce((s, j) => s + (j.downloaded || 0), 0);
-    const totalFail  = jobs.reduce((s, j) => s + (j.failed || 0), 0);
-    mFound.textContent = totalFound || '0';
-    mDone.textContent  = totalDone  || '0';
-    mFail.textContent  = totalFail  || '0';
+  function resetInterfaceState() {
+    btnStart.disabled = false;
+    btnPause.disabled = true;
+    btnStop.disabled = true;
+    btnPause.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg> Pause`;
   }
 
   function appendLog(msg, level = 'info') {
@@ -135,27 +184,24 @@
     const line = document.createElement('div');
     line.className = `log-line ${level}`;
     const ts = new Date().toLocaleTimeString('en-IN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    line.textContent = `[${ts}] ${String(msg).slice(0, 120)}`;
+    line.textContent = `[${ts}] ${String(msg)}`;
+    
     logBox.appendChild(line);
 
-    // Keep max lines
     while (logBox.children.length > MAX_LOG_LINES) {
       logBox.removeChild(logBox.firstChild);
     }
     logBox.scrollTop = logBox.scrollHeight;
   }
 
-  function statusClass(status) {
-    const map = { SCRAPING:'running', NAVIGATING:'running', CAPTCHA_WAIT:'captcha', DONE:'done', FAILED:'failed', QUEUED:'queued', RETRYING:'running' };
-    return map[status] || 'queued';
-  }
-
-  function statusIcon(status) {
-    const map = { SCRAPING:'⚡', NAVIGATING:'🌐', CAPTCHA_WAIT:'🔐', DONE:'✅', FAILED:'❌', QUEUED:'⏳', RETRYING:'🔄', DOWNLOADING:'📥' };
-    return map[status] || '⏳';
-  }
-
-  // ── Init ───────────────────────────────────────────────────────────────────
-  requestStatus();
-  setInterval(requestStatus, 4000);
+  // ── Initialize Execution Loops ─────────────────────────────────────────────
+  connectToEngine();
+  
+  // Periodically prompt for pipeline updates to fetch new counts dynamically
+  setInterval(() => {
+    if (dashboardPort) {
+      dashboardPort.postMessage({ type: 'GET_STATUS' });
+    }
+  }, 3000);
+  
 })();
