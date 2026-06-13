@@ -54,7 +54,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // ── Connection Port Handlers (Internal Popup & External Web Dashboard) ───────
-// Internal connections (Popup UI panel panel linkages)
 chrome.runtime.onConnect.addListener(function(port) {
   if (port.name !== 'gem-dashboard' && port.name !== 'gem-scraper') return;
   state.ports.add(port);
@@ -68,7 +67,6 @@ chrome.runtime.onConnect.addListener(function(port) {
   });
 });
 
-// External web app connections (Fixes the Vercel "Not Connected" dashboard bug)
 chrome.runtime.onConnectExternal.addListener(function(port) {
   if (port.name !== 'gem-dashboard' && port.name !== 'gem-scraper') return;
   state.ports.add(port);
@@ -151,7 +149,6 @@ chrome.tabs.onUpdated.addListener(function(tabId, info) {
   }
 });
 
-// Clear track states when a user manually closes target tabs
 chrome.tabs.onRemoved.addListener(function(tabId) {
   var jobId = state.tabJobs.get(tabId);
   if (jobId) {
@@ -211,8 +208,10 @@ function startJob(jobId) {
   } else if (job.portal === 'tendersontime') {
     url = C.URLS.TOT_SEARCH;
   } else {
+    // FIXED: Formats keyword payload into a clean lowercase hyphen-separated endpoint route for Tender247
     let term = job.keywords && job.keywords.length > 0 ? job.keywords[0] : 'latest';
-    url = C.URLS.T247_BASE + encodeURIComponent(term);
+    let slug = term.toLowerCase().trim().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-') + '-tenders';
+    url = C.URLS.T247_BASE + slug;
   }
 
   chrome.tabs.create({ url: url, active: false }, function(tab) {
