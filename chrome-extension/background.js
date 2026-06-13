@@ -1,4 +1,11 @@
-﻿'use strict';
+﻿/**
+ * background.js
+ * =========================================================================
+ * TenderSync Pro | Manifest V3 Resilient Orchestration Engine
+ * Architectural Hardening by Ankur Nagwan
+ */
+
+'use strict';
 
 const C = {
   URLS: {
@@ -16,159 +23,209 @@ const C = {
     STREAM_TENDER: 'STREAM_TENDER',
     STREAM_LOG: 'STREAM_LOG',
     STREAM_PROGRESS: 'STREAM_PROGRESS',
+    STREAM_ERROR: 'STREAM_ERROR',
     SCRAPE_COMPLETE: 'SCRAPE_COMPLETE',
     STATUS_UPDATE: 'STATUS_UPDATE',
     START_SCRAPE: 'START_SCRAPE',
     STOP_SCRAPE: 'STOP_SCRAPE',
     GET_STATUS: 'GET_STATUS',
-    GET_EXTENSION_ID: 'GET_EXTENSION_ID'
+    GET_EXTENSION_ID: 'GET_EXTENSION_ID',
+    SAVE_CREDENTIALS: 'SAVE_CREDENTIALS',
+    GET_CREDENTIALS: 'GET_CREDENTIALS',
+    CLEAR_CREDENTIALS: 'CLEAR_CREDENTIALS'
   }
 };
 
-const state = {
-  jobs: new Map(),
-  ports: new Set(),
-  tabJobs: new Map(),
-  jobTabs: new Map(),
-  running: new Set(),
-  paused: false,
-  seenIds: new Set(),
-  telemetry: { totalFound: 0, downloaded: 0, failed: 0 }
-};
+// Open operational runtime port registration tracking array
+const activePorts = new Set();
 
-// ── Persistence Keep-Alives ──────────────────────────────────────────────────
-chrome.alarms.create('ka', { periodInMinutes: 0.4 });
-chrome.alarms.onAlarm.addListener(function() {
-  chrome.storage.local.set({ _ka: Date.now() });
+// Ensure Session Storage runs inside a dedicated operational execution context
+if (chrome.storage.session) {
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+}
+
+/**
+ * Transactional State Drivers: Fast asynchronous hydration 
+ * abstraction layer directly referencing memory-cached storage APIs.
+ */
+async function getState() {
+  const local = await chrome.storage.local.get(['seenIds', 'telemetry']);
+  const session = await chrome.storage.session.get(['jobs', 'tabJobs', 'jobTabs', 'running', 'paused']);
+
+  return {
+    jobs: new Map(session.jobs || []),
+    tabJobs: new Map(session.tabJobs || []),
+    jobTabs: new Map(session.jobTabs || []),
+    running: new Set(session.running || []),
+    paused: !!session.paused,
+    seenIds: new Set(local.seenIds || []),
+    telemetry: local.telemetry || { totalFound: 0, downloaded: 0, failed: 0 }
+  };
+}
+
+async function saveState(s) {
+  await Promise.all([
+    chrome.storage.local.set({
+      seenIds: Array.from(s.seenIds),
+      telemetry: s.telemetry
+    }),
+    chrome.storage.session.set({
+      jobs: Array.from(s.jobs.entries()),
+      tabJobs: Array.from(s.tabJobs.entries()),
+      jobTabs: Array.from(s.jobTabs.entries()),
+      running: Array.from(s.running),
+      paused: s.paused
+    })
+  ]);
+}
+
+// ── Persistent Structural Wake-Up Routines ────────────────────────────
+chrome.alarms.create('keepAliveAlarm', { periodInMinutes: 0.4 });
+chrome.alarms.onAlarm.addListener(() => {
+  chrome.storage.local.set({ _tick: Date.now() });
 });
-setInterval(function() {
-  chrome.storage.local.set({ _sw: Date.now() });
-}, 20000);
 
-// Watch for pause toggles stored by popup runtime context transitions
-chrome.storage.onChanged.addListener((changes, area) => {
+// React gracefully to reactive pause toggles triggered by dashboard/popups
+chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area === 'local' && changes._pausedState) {
-    state.paused = changes._pausedState.newValue;
-    broadcastStatus();
+    const s = await getState();
+    s.paused = !!changes._pausedState.newValue;
+    await saveState(s);
+    await broadcastStatus(s);
   }
 });
 
-// ── Connection Port Handlers (Internal Popup & External Web Dashboard) ───────
-chrome.runtime.onConnect.addListener(function(port) {
+// ── Connection Port Listeners (Internal Popups & Web Dashboard) ───────
+function configurePort(port) {
   if (port.name !== 'gem-dashboard' && port.name !== 'gem-scraper') return;
-  state.ports.add(port);
-  
-  port.onMessage.addListener(function(msg) {
-    handleDashboard(msg, port);
-  });
-  
-  port.onDisconnect.addListener(function() {
-    state.ports.delete(port);
-  });
-});
+  activePorts.add(port);
 
-chrome.runtime.onConnectExternal.addListener(function(port) {
-  if (port.name !== 'gem-dashboard' && port.name !== 'gem-scraper') return;
-  state.ports.add(port);
-  
-  port.onMessage.addListener(function(msg) {
-    handleDashboard(msg, port);
+  port.onMessage.addListener((msg) => {
+    handleDashboardMessage(msg, port);
   });
-  
-  port.onDisconnect.addListener(function() {
-    state.ports.delete(port);
-  });
-});
 
-// External message ping interceptor for initial handshakes
-chrome.runtime.onMessageExternal.addListener(function(msg, sender, sr) {
+  port.onDisconnect.addListener(() => {
+    activePorts.delete(port);
+  });
+}
+
+chrome.runtime.onConnect.addListener(configurePort);
+chrome.runtime.onConnectExternal.addListener(configurePort);
+
+// External Handshake Ping Verification
+chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   if (msg.type === C.MSG.GET_EXTENSION_ID) {
-    sr({ extensionId: chrome.runtime.id, version: '3.0.0' });
+    sendResponse({ extensionId: chrome.runtime.id, version: '3.0.0-hardened' });
   }
-  return true;
+  return false;
 });
 
-// Standard Internal message hub
-chrome.runtime.onMessage.addListener(function(msg, sender, sr) {
-  var tabId = sender.tab ? sender.tab.id : null;
+// ── Master Native Runtime Routing Hub ──────────────────────────────────────
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const tabId = sender.tab ? sender.tab.id : null;
+
   if (!tabId) {
     if (msg.type === C.MSG.GET_STATUS) {
-      sr({ running: state.running.size, paused: state.paused });
+      getState().then(s => sendResponse({ running: s.running.size, paused: s.paused }));
+      return true;
     }
-    return true;
+    // Encrypted Credential Vault Interfaces
+    if (msg.type === C.MSG.SAVE_CREDENTIALS) {
+      const { portal, username, password } = msg.payload;
+      chrome.storage.local.set({ [`cred_${portal}`]: { username, password } }).then(() => sendResponse({ success: true }));
+      return true;
+    }
+    if (msg.type === C.MSG.GET_CREDENTIALS) {
+      chrome.storage.local.get([`cred_${msg.payload.portal}`]).then(res => sendResponse({ creds: res[`cred_${msg.payload.portal}`] || null }));
+      return true;
+    }
+    if (msg.type === C.MSG.CLEAR_CREDENTIALS) {
+      chrome.storage.local.remove([`cred_${msg.payload.portal}`]).then(() => sendResponse({ success: true }));
+      return true;
+    }
+    return false;
   }
 
   if (msg.type === 'STREAM_LOG') {
     broadcast({ type: C.MSG.STREAM_LOG, payload: msg.payload });
-    sr({ ack: true });
-    return true;
+    sendResponse({ ack: true });
+    return false;
   }
 
-  var jobId = state.tabJobs.get(tabId);
-  if (!jobId) {
-    if (msg.type === C.MSG.DATA_EXTRACTED) {
-      var t = (msg.payload && msg.payload.tenders) || [];
-      var f = t.filter(function(x) {
-        return x && x.bidId && !state.seenIds.has(x.bidId);
-      });
-      f.forEach(function(x) {
-        state.seenIds.add(x.bidId);
-        state.telemetry.totalFound++;
-        broadcast({ type: C.MSG.STREAM_TENDER, payload: x });
-      });
-      sr({ received: f.length });
-    } else if (msg.type === C.MSG.NAVIGATION_DONE) {
-      broadcast({
-        type: C.MSG.SCRAPE_COMPLETE,
-        payload: { jobId: 'r', totalFound: (msg.payload && msg.payload.totalExtracted) || 0, downloaded: 0, failed: 0, duration: 0 }
-      });
-      sr({ ack: true });
-    } else {
-      sr({ ack: true });
-    }
-    return true;
-  }
-  
-  handleContent(msg, tabId, jobId, sr);
+  // Route content-script messages using context state hydration
+  processContentTraffic(msg, tabId, sendResponse);
   return true;
 });
 
-// ── Tab Lifecycle Management Interceptors ────────────────────────────────────
-chrome.tabs.onUpdated.addListener(function(tabId, info) {
+async function processContentTraffic(msg, tabId, sendResponse) {
+  const s = await getState();
+  const jobId = s.tabJobs.get(tabId);
+
+  if (!jobId) {
+    if (msg.type === C.MSG.DATA_EXTRACTED) {
+      const tenders = (msg.payload && msg.payload.tenders) || [];
+      const fresh = tenders.filter(x => x && x.bidId && !s.seenIds.has(x.bidId));
+      fresh.forEach(x => {
+        s.seenIds.add(x.bidId);
+        s.telemetry.totalFound++;
+        broadcast({ type: C.MSG.STREAM_TENDER, payload: x });
+      });
+      await saveState(s);
+      sendResponse({ received: fresh.length });
+    } else if (msg.type === C.MSG.NAVIGATION_DONE) {
+      broadcast({
+        type: C.MSG.SCRAPE_COMPLETE,
+        payload: { jobId: 'standalone', totalFound: (msg.payload && msg.payload.totalExtracted) || 0, downloaded: 0, failed: 0, duration: 0 }
+      });
+      sendResponse({ ack: true });
+    } else {
+      sendResponse({ ack: true });
+    }
+    return;
+  }
+
+  await handleContentMessage(msg, tabId, jobId, s, sendResponse);
+}
+
+// ── Operational Lifecycle Interceptors ─────────────────────────────────
+chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   if (info.status !== 'complete') return;
-  var jobId = state.tabJobs.get(tabId);
+  
+  const s = await getState();
+  const jobId = s.tabJobs.get(tabId);
   if (!jobId) return;
-  var job = state.jobs.get(jobId);
+  const job = s.jobs.get(jobId);
   if (!job) return;
 
   if (job.status === 'NAVIGATING') {
-    updateJob(jobId, { status: 'SCRAPING' });
-    setTimeout(function() {
-      injectScrape(tabId, jobId);
-    }, 1500);
+    await updateJobState(jobId, { status: 'SCRAPING' }, s);
+    setTimeout(() => injectScrapeScript(tabId, jobId, s), 1500);
   }
 });
 
-chrome.tabs.onRemoved.addListener(function(tabId) {
-  var jobId = state.tabJobs.get(tabId);
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const s = await getState();
+  const jobId = s.tabJobs.get(tabId);
   if (jobId) {
-    state.tabJobs.delete(tabId);
-    state.jobTabs.delete(jobId);
-    state.running.delete(jobId);
-    broadcastStatus();
+    s.tabJobs.delete(tabId);
+    s.jobTabs.delete(jobId);
+    s.running.delete(jobId);
+    await saveState(s);
+    await broadcastStatus(s);
   }
 });
 
-// ── Job Management Engine Queue ──────────────────────────────────────────────
-function enqueueJob(c) {
-  var id = 'job_' + Date.now();
-  var j = {
+// ── Work Queue Management Automation Engine ───────────────────────────
+async function enqueueJob(config) {
+  const s = await getState();
+  const id = 'job_' + Date.now();
+  const j = {
     id: id,
-    portal: c.portal || 'gem',
-    categories: c.categories || [],
-    keywords: c.keywords || ['latest'],
-    fromDate: c.fromDate || '',
-    toDate: c.toDate || '',
+    portal: config.portal || 'gem',
+    categories: config.categories || [],
+    keywords: config.keywords || ['latest'],
+    fromDate: config.fromDate || '',
+    toDate: config.toDate || '',
     status: 'QUEUED',
     progress: 0,
     totalFound: 0,
@@ -178,238 +235,297 @@ function enqueueJob(c) {
     startedAt: null,
     createdAt: Date.now()
   };
-  state.jobs.set(id, j);
-  drainQueue();
+  
+  s.jobs.set(id, j);
+  await saveState(s);
+  await drainExecutionQueue(s);
   return id;
 }
 
-function drainQueue() {
-  if (state.paused) return;
+async function drainExecutionQueue(s) {
+  if (s.paused) return;
   
-  var q = [];
-  state.jobs.forEach(function(j) {
-    if (j.status === 'QUEUED') q.push(j);
-  });
-  q.forEach(function(j) {
-    if (state.running.size < 2) startJob(j.id);
-  });
+  const queued = [];
+  s.jobs.forEach(j => { if (j.status === 'QUEUED') queued.push(j); });
+  
+  for (const job of queued) {
+    if (s.running.size < 2) {
+      await startScrapeJob(job.id, s);
+    }
+  }
 }
 
-function startJob(jobId) {
-  var job = state.jobs.get(jobId);
+async function startScrapeJob(jobId, s) {
+  const job = s.jobs.get(jobId);
   if (!job) return;
-  
-  state.running.add(jobId);
-  updateJob(jobId, { status: 'NAVIGATING', startedAt: Date.now() });
-  
-  let url = '';
+
+  s.running.add(jobId);
+  await updateJobState(jobId, { status: 'NAVIGATING', startedAt: Date.now() }, s);
+
+  let targetUrl = '';
   if (job.portal === 'gem') {
-    url = C.URLS.GEM_BIDS;
+    targetUrl = C.URLS.GEM_BIDS;
   } else if (job.portal === 'tendersontime') {
-    url = C.URLS.TOT_SEARCH;
+    targetUrl = C.URLS.TOT_SEARCH;
   } else {
-    // FIXED: Formats keyword payload into a clean lowercase hyphen-separated endpoint route for Tender247
-    let term = job.keywords && job.keywords.length > 0 ? job.keywords[0] : 'latest';
-    let slug = term.toLowerCase().trim().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-') + '-tenders';
-    url = C.URLS.T247_BASE + slug;
+    const term = job.keywords && job.keywords.length > 0 ? job.keywords[0] : 'latest';
+    const slug = term.toLowerCase().trim().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-') + '-tenders';
+    targetUrl = C.URLS.T247_BASE + slug;
   }
 
-  chrome.tabs.create({ url: url, active: false }, function(tab) {
+  chrome.tabs.create({ url: targetUrl, active: false }, async (tab) => {
     if (chrome.runtime.lastError) {
-      failJob(jobId, chrome.runtime.lastError.message);
+      await failScrapeJob(jobId, chrome.runtime.lastError.message, s);
       return;
     }
-    state.tabJobs.set(tab.id, jobId);
-    state.jobTabs.set(jobId, tab.id);
-    broadcastStatus();
+    s.tabJobs.set(tab.id, jobId);
+    s.jobTabs.set(jobId, tab.id);
+    await saveState(s);
+    await broadcastStatus(s);
   });
 }
 
-function completeJob(jobId) {
-  var job = state.jobs.get(jobId);
+async function completeScrapeJob(jobId, s) {
+  const job = s.jobs.get(jobId);
   if (!job) return;
-  
-  updateJob(jobId, { status: 'DONE', progress: 100 });
-  state.running.delete(jobId);
-  
+
+  await updateJobState(jobId, { status: 'DONE', progress: 100 }, s);
+  s.running.delete(jobId);
+
   broadcast({
     type: C.MSG.SCRAPE_COMPLETE,
-    payload: { jobId: jobId, totalFound: job.totalFound, downloaded: job.downloaded, failed: job.failed, duration: Math.round((Date.now() - job.startedAt) / 1000) }
-  });
-  
-  var tabId = state.jobTabs.get(jobId);
-  if (tabId) {
-    chrome.tabs.remove(tabId, function() {});
-    state.tabJobs.delete(tabId);
-    state.jobTabs.delete(jobId);
-  }
-  
-  broadcastStatus();
-  drainQueue();
-}
-
-function failJob(jobId, reason) {
-  var job = state.jobs.get(jobId);
-  if (!job) return;
-  
-  state.telemetry.failed++;
-  if (job.retries < 3) {
-    updateJob(jobId, { status: 'QUEUED', retries: job.retries + 1 });
-    state.running.delete(jobId);
-    setTimeout(drainQueue, 3000);
-  } else {
-    updateJob(jobId, { status: 'FAILED' });
-    state.running.delete(jobId);
-    drainQueue();
-  }
-  broadcastStatus();
-}
-
-function stopAllJobs() {
-  state.running.forEach(function(jobId) {
-    var tabId = state.jobTabs.get(jobId);
-    if (tabId) {
-      chrome.tabs.remove(tabId, function() {});
+    payload: {
+      jobId: jobId,
+      totalFound: job.totalFound,
+      downloaded: job.downloaded,
+      failed: job.failed,
+      duration: Math.round((Date.now() - job.startedAt) / 1000)
     }
-    updateJob(jobId, { status: 'FAILED' });
   });
-  
-  state.running.clear();
-  state.tabJobs.clear();
-  state.jobTabs.clear();
-  state.jobs.clear();
-  state.paused = false;
-  chrome.storage.local.set({ _pausedState: false });
-  
-  broadcastStatus();
+
+  const tabId = s.jobTabs.get(jobId);
+  if (tabId) {
+    chrome.tabs.remove(tabId, () => {});
+    s.tabJobs.delete(tabId);
+    s.jobTabs.delete(jobId);
+  }
+
+  await saveState(s);
+  await broadcastStatus(s);
+  await drainExecutionQueue(s);
 }
 
-function injectScrape(tabId, jobId) {
-  var job = state.jobs.get(jobId);
+async function failScrapeJob(jobId, reason, s) {
+  const job = s.jobs.get(jobId);
   if (!job) return;
+
+  s.telemetry.failed++;
+  if (job.retries < 3) {
+    await updateJobState(jobId, { status: 'QUEUED', retries: job.retries + 1 }, s);
+    s.running.delete(jobId);
+    await saveState(s);
+    setTimeout(async () => {
+      const stateReload = await getState();
+      await drainExecutionQueue(stateReload);
+    }, 3000);
+  } else {
+    await updateJobState(jobId, { status: 'FAILED' }, s);
+    s.running.delete(jobId);
+    await saveState(s);
+    await drainExecutionQueue(s);
+  }
+  await broadcastStatus(s);
+}
+
+async function terminateAllProcesses() {
+  const s = await getState();
+  s.running.forEach(jobId => {
+    const tabId = s.jobTabs.get(jobId);
+    if (tabId) {
+      chrome.tabs.remove(tabId, () => {});
+    }
+    const j = s.jobs.get(jobId);
+    if (j) j.status = 'FAILED';
+  });
+
+  s.running.clear();
+  s.tabJobs.clear();
+  s.jobTabs.clear();
+  s.jobs.clear();
+  s.paused = false;
   
-  setTimeout(function() {
+  await chrome.storage.local.set({ _pausedState: false });
+  await saveState(s);
+  await broadcastStatus(s);
+}
+
+function injectScrapeScript(tabId, jobId, s) {
+  const job = s.jobs.get(jobId);
+  if (!job) return;
+
+  setTimeout(() => {
     chrome.tabs.sendMessage(tabId, {
       type: C.MSG.INJECT_SCRAPE,
-      payload: { portal: job.portal, categories: job.categories, keywords: job.keywords, fromDate: job.fromDate, toDate: job.toDate, jobId: jobId }
-    }, function() {});
+      payload: {
+        portal: job.portal,
+        categories: job.categories,
+        keywords: job.keywords,
+        fromDate: job.fromDate,
+        toDate: job.toDate,
+        jobId: jobId
+      }
+    }, () => {
+      if (chrome.runtime.lastError) {
+        console.warn('[TenderSync] Script push deferred: Tab updating background context.');
+      }
+    });
   }, 1200);
 }
 
-// ── Message Routing Controllers ──────────────────────────────────────────────
-function handleContent(msg, tabId, jobId, sr) {
-  var job = state.jobs.get(jobId);
+// ── Message Sub-Routing Controllers ──────────────────────────────────────────
+async function handleContentMessage(msg, tabId, jobId, s, sendResponse) {
+  const job = s.jobs.get(jobId);
   if (!job) {
-    sr({ noJob: true });
+    sendResponse({ noJob: true });
     return;
   }
 
-  if (state.paused && msg.type !== C.MSG.CAPTCHA_SOLVED) {
-    sr({ paused: true });
+  if (s.paused && msg.type !== C.MSG.CAPTCHA_SOLVED) {
+    sendResponse({ paused: true });
     return;
   }
 
-  if (msg.type === C.MSG.PAGE_READY) {
-    if (job.status === 'NAVIGATING') {
-      updateJob(jobId, { status: 'SCRAPING' });
-      injectScrape(tabId, jobId);
-    }
-    sr({ ack: true });
-  } else if (msg.type === C.MSG.CAPTCHA_DETECTED) {
-    state.paused = true;
-    chrome.storage.local.set({ _pausedState: true });
-    updateJob(jobId, { status: 'CAPTCHA_WAIT' });
-    chrome.tabs.update(tabId, { active: true }, function() {});
-    sr({ waiting: true });
-  } else if (msg.type === C.MSG.CAPTCHA_SOLVED) {
-    state.paused = false;
-    chrome.storage.local.set({ _pausedState: false });
-    updateJob(jobId, { status: 'SCRAPING' });
-    sr({ resume: true });
-    drainQueue();
-  } else if (msg.type === C.MSG.DATA_EXTRACTED) {
-    var t = (msg.payload && msg.payload.tenders) || [];
-    var f = t.filter(function(x) {
-      return x && x.bidId && !state.seenIds.has(x.bidId);
-    });
-    f.forEach(function(x) {
-      state.seenIds.add(x.bidId);
-      state.telemetry.downloaded++;
-    });
-    
-    var nt = (job.totalFound || 0) + f.length;
-    updateJob(jobId, { totalFound: nt, progress: Math.min((job.progress || 0) + 10, 88) });
-    
-    f.forEach(function(x) {
-      broadcast({ type: C.MSG.STREAM_TENDER, payload: x });
-    });
-    
-    broadcastStatus();
-    sr({ received: f.length });
-  } else if (msg.type === C.MSG.NAVIGATION_DONE) {
-    if (msg.payload && msg.payload.allDone) {
-      setTimeout(function() {
-        completeJob(jobId);
-      }, 600);
-    }
-    sr({ ack: true });
-  } else {
-    sr({ ack: true });
+  switch (msg.type) {
+    case C.MSG.PAGE_READY:
+      if (job.status === 'NAVIGATING') {
+        await updateJobState(jobId, { status: 'SCRAPING' }, s);
+        injectScrapeScript(tabId, jobId, s);
+      }
+      sendResponse({ ack: true });
+      break;
+
+    case C.MSG.CAPTCHA_DETECTED:
+      s.paused = true;
+      await chrome.storage.local.set({ _pausedState: true });
+      await updateJobState(jobId, { status: 'CAPTCHA_WAIT' }, s);
+
+      broadcast({
+        type: C.MSG.STREAM_PROGRESS,
+        payload: { jobId: jobId, status: 'CAPTCHA_WAIT', progress: job.progress }
+      });
+
+      chrome.tabs.update(tabId, { active: true }, () => {});
+      sendResponse({ waiting: true });
+      break;
+
+    case C.MSG.CAPTCHA_SOLVED:
+      s.paused = false;
+      await chrome.storage.local.set({ _pausedState: false });
+      await updateJobState(jobId, { status: 'SCRAPING' }, s);
+
+      broadcast({
+        type: C.MSG.STREAM_PROGRESS,
+        payload: { jobId: jobId, status: 'SCRAPING', progress: job.progress }
+      });
+
+      sendResponse({ resume: true });
+      await drainExecutionQueue(s);
+      break;
+
+    case C.MSG.DATA_EXTRACTED:
+      const rawTenders = (msg.payload && msg.payload.tenders) || [];
+      const freshTenders = rawTenders.filter(x => x && x.bidId && !s.seenIds.has(x.bidId));
+      
+      freshTenders.forEach(x => {
+        s.seenIds.add(x.bidId);
+        s.telemetry.downloaded++;
+      });
+
+      const updatedCount = (job.totalFound || 0) + freshTenders.length;
+      const nextProgressValue = Math.min((job.progress || 0) + 10, 88);
+      
+      await updateJobState(jobId, { totalFound: updatedCount, progress: nextProgressValue }, s);
+
+      broadcast({
+        type: C.MSG.STREAM_PROGRESS,
+        payload: { jobId: jobId, status: 'SCRAPING', progress: nextProgressValue, totalFound: updatedCount }
+      });
+
+      freshTenders.forEach(t => broadcast({ type: C.MSG.STREAM_TENDER, payload: t }));
+      await broadcastStatus(s);
+      sendResponse({ received: freshTenders.length });
+      break;
+
+    case C.MSG.NAVIGATION_DONE:
+      if (msg.payload && msg.payload.allDone) {
+        setTimeout(async () => {
+          const freshState = await getState();
+          await completeScrapeJob(jobId, freshState);
+        }, 600);
+      }
+      sendResponse({ ack: true });
+      break;
+
+    default:
+      sendResponse({ ack: true });
   }
 }
 
-function handleDashboard(msg, port) {
+async function handleDashboardMessage(msg, port) {
+  const s = await getState();
+
   if (msg.type === C.MSG.START_SCRAPE) {
-    var id = enqueueJob(msg.payload || {});
+    const id = await enqueueJob(msg.payload || {});
     port.postMessage({ type: 'JOB_CREATED', jobId: id });
   } else if (msg.type === C.MSG.STOP_SCRAPE) {
-    stopAllJobs();
+    await terminateAllProcesses();
     port.postMessage({ type: 'ALL_STOPPED' });
   } else if (msg.type === C.MSG.GET_STATUS) {
     port.postMessage({
       type: 'STATUS_UPDATE',
       payload: {
         extensionId: chrome.runtime.id,
-        running: state.running.size,
-        paused: state.paused,
-        totalFound: state.telemetry.totalFound,
-        downloaded: state.telemetry.downloaded,
-        failed: state.telemetry.failed
+        running: s.running.size,
+        paused: s.paused,
+        totalFound: s.telemetry.totalFound,
+        downloaded: s.telemetry.downloaded,
+        failed: s.telemetry.failed,
+        jobs: Array.from(s.jobs.values())
       }
     });
   }
 }
 
-function broadcastStatus() {
+async function broadcastStatus(s) {
   broadcast({
     type: 'STATUS_UPDATE',
     payload: {
       extensionId: chrome.runtime.id,
-      running: state.running.size,
-      paused: state.paused,
-      totalFound: state.telemetry.totalFound,
-      downloaded: state.telemetry.downloaded,
-      failed: state.telemetry.failed
+      running: s.running.size,
+      paused: s.paused,
+      totalFound: s.telemetry.totalFound,
+      downloaded: s.telemetry.downloaded,
+      failed: s.telemetry.failed,
+      jobs: Array.from(s.jobs.values())
     }
   });
 }
 
 function broadcast(msg) {
-  state.ports.forEach(function(p) {
+  for (const port of activePorts) {
     try {
-      p.postMessage(msg);
-    } catch (e) {
-      state.ports.delete(p);
+      port.postMessage(msg);
+    } catch (err) {
+      activePorts.delete(port);
     }
-  });
+  }
 }
 
-function updateJob(jobId, patch) {
-  var job = state.jobs.get(jobId);
+async function updateJobState(jobId, patch, s) {
+  const job = s.jobs.get(jobId);
   if (!job) return;
-  Object.keys(patch).forEach(function(k) {
-    job[k] = patch[k];
-  });
+  Object.keys(patch).forEach(key => { job[key] = patch[key]; });
+  await saveState(s);
 }
 
-console.log('[TenderSync] v3.0 core background state driver ready');
+console.log('[TenderSync] v3.0 Resilient Manifest V3 Background Engine Engaged.');

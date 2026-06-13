@@ -9,14 +9,14 @@
 
 import Dexie from 'dexie';
 
-// ── Schema ────────────────────────────────────────────────────────────────────
+// ── Schema Configuration ──────────────────────────────────────────────────────
 const db = new Dexie('GemAggregatorDB');
 
 db.version(3).stores({
   /**
    * tenders — main ledger
    * Indexes: ++id (auto-pk), bidId (unique lookup), portal, status,
-   * category, dueDate, scrapedAt
+   * category, dueDate, scrapedAt, organization
    */
   tenders: '++id, &bidId, portal, status, category, dueDate, scrapedAt, organization',
 
@@ -41,7 +41,7 @@ db.version(3).stores({
   settings: '&key',
 });
 
-// ── Tender CRUD ───────────────────────────────────────────────────────────────
+// ── Tender CRUD Operations ────────────────────────────────────────────────────
 
 /**
  * Upsert a tender — insert if new, update fields if bidId already exists.
@@ -63,17 +63,17 @@ export async function upsertTender(tender) {
       syncedAt: new Date().toISOString(),
     });
   } catch (err) {
-    if (err.name === 'ConstraintError') return null; // race condition, safe to ignore
+    if (err.name === 'ConstraintError') return null; // race condition handle, safe to ignore
     throw err;
   }
 }
 
 /**
- * Bulk upsert — used when streaming tenders in from background.
+ * Bulk upsert — used when streaming tenders in from extension background.
  * @param {Object[]} tenders
  */
 export async function upsertManyTenders(tenders) {
-  await db.transaction('rw', db.tenders, async () => {
+  return await db.transaction('rw', db.tenders, async () => {
     for (const t of tenders) {
       await upsertTender(t);
     }
@@ -86,30 +86,42 @@ export async function upsertManyTenders(tenders) {
 export async function updateTenderStatus(bidId, status, folderPath = '') {
   const record = await db.tenders.where('bidId').equals(bidId).first();
   if (record) {
-    await db.tenders.update(record.id, {
+    const updates = {
       status,
-      folderPath: folderPath || record.folderPath,
       syncedAt: new Date().toISOString(),
-    });
+    };
+    if (folderPath) updates.folderPath = folderPath;
+    await db.tenders.update(record.id, updates);
   }
 }
 
 /**
- * Fetch all tenders with optional filtering.
+ * Fetch all tenders with optimized multi-index filtering rules.
  * @param {{ portal?, status?, category?, search?, limit? }} opts
  */
 export async function fetchTenders({ portal, status, category, search, limit = 500 } = {}) {
-  let query = db.tenders.orderBy('scrapedAt').reverse();
+  let collection = db.tenders.orderBy('scrapedAt').reverse();
 
-  const results = await query.filter(t => {
-    if (portal   && t.portal !== portal)                          return false;
-    if (status   && t.status !== status)                          return false;
+  // Primary Indexed Scanning Hooks
+  if (status) {
+    collection = db.tenders.where('status').equals(status).reverse();
+  } else if (portal) {
+    collection = db.tenders.where('portal').equals(portal).reverse();
+  }
+
+  // Memory Array Filter Processing for secondary non-indexed strings
+  const results = await collection.filter(t => {
+    if (status && portal && t.portal !== portal) return false;
+    if (portal && !status && t.portal !== portal) return false;
     if (category && !t.category?.toLowerCase().includes(category.toLowerCase())) return false;
+    
     if (search) {
       const q = search.toLowerCase();
-      return t.title?.toLowerCase().includes(q)
-          || t.organization?.toLowerCase().includes(q)
-          || t.bidId?.toLowerCase().includes(q);
+      return (
+        t.title?.toLowerCase().includes(q) ||
+        t.organization?.toLowerCase().includes(q) ||
+        t.bidId?.toLowerCase().includes(q)
+      );
     }
     return true;
   }).limit(limit).toArray();
@@ -134,11 +146,13 @@ export async function deleteTender(bidId) {
   if (t) await db.tenders.delete(t.id);
 }
 
-/** Clear ALL tender data (danger zone). */
+/** Clear ALL tender data stores safely. */
 export async function clearAllTenders() {
-  await db.tenders.clear();
-  await db.retryQueue.clear();
-  await db.aiReports.clear();
+  await db.transaction('rw', [db.tenders, db.retryQueue, db.aiReports], async () => {
+    await db.tenders.clear();
+    await db.retryQueue.clear();
+    await db.aiReports.clear();
+  });
 }
 
 // ── Analytics Queries ─────────────────────────────────────────────────────────
@@ -146,38 +160,41 @@ export async function clearAllTenders() {
 export async function getStats() {
   const today = new Date().toISOString().split('T')[0];
 
-  const [total, todayCount, downloaded, failed, byPortal, byStatus, byCategory] = await Promise.all([
+  const [total, todayCount, downloaded, failed, allRows] = await Promise.all([
     db.tenders.count(),
     db.tenders.where('scrapedAt').startsWith(today).count(),
     db.tenders.where('status').equals('Downloaded').count(),
     db.tenders.where('status').anyOf(['Failed', 'Partial']).count(),
-    db.tenders.orderBy('portal').toArray().then(rows => {
-      const map = {};
-      rows.forEach(r => { map[r.portal] = (map[r.portal] || 0) + 1; });
-      return Object.entries(map).map(([name, value]) => ({ name, value }));
-    }),
-    db.tenders.toArray().then(rows => {
-      const map = {};
-      rows.forEach(r => { map[r.status] = (map[r.status] || 0) + 1; });
-      return Object.entries(map).map(([name, value]) => ({ name, value }));
-    }),
-    db.tenders.toArray().then(rows => {
-      const map = {};
-      rows.forEach(r => {
-        const cat = r.category || 'Uncategorized';
-        map[cat] = (map[cat] || 0) + 1;
-      });
-      return Object.entries(map)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 8)
-        .map(([name, value]) => ({ name, value }));
-    }),
+    db.tenders.toArray()
   ]);
 
-  return { total, todayCount, downloaded, failed, byPortal, byStatus, byCategory };
+  // Aggregate maps inside single array loop pass to maximize dashboard speeds
+  const portalMap = {};
+  const statusMap = {};
+  const categoryMap = {};
+
+  allRows.forEach(r => {
+    if (r.portal) portalMap[r.portal] = (portalMap[r.portal] || 0) + 1;
+    if (r.status) statusMap[r.status] = (statusMap[r.status] || 0) + 1;
+    const cat = r.category || 'Uncategorized';
+    categoryMap[cat] = (categoryMap[cat] || 0) + 1;
+  });
+
+  return {
+    total,
+    todayCount,
+    downloaded,
+    failed,
+    byPortal: Object.entries(portalMap).map(([name, value]) => ({ name, value })),
+    byStatus: Object.entries(statusMap).map(([name, value]) => ({ name, value })),
+    byCategory: Object.entries(categoryMap)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([name, value]) => ({ name, value })),
+  };
 }
 
-// ── Run History ───────────────────────────────────────────────────────────────
+// ── Run History Log Operations ────────────────────────────────────────────────
 
 export async function startRun({ portal, categories, keywords }) {
   return db.runs.add({
@@ -196,14 +213,18 @@ export async function completeRun(runId, { totalFound, downloaded, failed }) {
 }
 
 export async function failRun(runId, error) {
-  await db.runs.update(runId, { status: 'failed', error, completedAt: new Date().toISOString() });
+  await db.runs.update(runId, { 
+    status: 'failed', 
+    error: error?.message || String(error), 
+    completedAt: new Date().toISOString() 
+  });
 }
 
 export async function getRecentRuns(limit = 10) {
   return db.runs.orderBy('startedAt').reverse().limit(limit).toArray();
 }
 
-// ── Retry Queue ───────────────────────────────────────────────────────────────
+// ── Retry Queue Management ────────────────────────────────────────────────────
 
 export async function addToRetryQueue(bidId, failedUrls) {
   const existing = await db.retryQueue.where('bidId').equals(bidId).first();
@@ -231,7 +252,7 @@ export async function clearRetryQueue() {
   await db.retryQueue.clear();
 }
 
-// ── AI Reports ────────────────────────────────────────────────────────────────
+// ── AI Generation Reports Storage ─────────────────────────────────────────────
 
 export async function saveAIReport(bidId, reportMarkdown) {
   const existing = await db.aiReports.where('bidId').equals(bidId).first();
@@ -246,7 +267,7 @@ export async function getAIReport(bidId) {
   return db.aiReports.where('bidId').equals(bidId).first();
 }
 
-// ── Settings ──────────────────────────────────────────────────────────────────
+// ── Application Settings Layer ────────────────────────────────────────────────
 
 export async function getSetting(key, defaultValue = null) {
   const row = await db.settings.get(key);

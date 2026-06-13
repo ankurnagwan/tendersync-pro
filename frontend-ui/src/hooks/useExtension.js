@@ -2,15 +2,16 @@
  * src/hooks/useExtension.js
  * =========================
  * Bulletproof React hook for Chrome Extension ↔ Vercel dashboard communication.
+ * Engineered for TenderSync Pro — Designed & Engineered by Ankur Nagwan
  *
- * Fixes applied in this version:
- *   1. Full chrome API environment guard (works on HTTP + HTTPS, localhost + Vercel)
- *   2. Extension ID format validation before any connect attempt
- *   3. Async ping-first handshake — verifies the extension is alive before opening port
- *   4. chrome.runtime.lastError checked and cleared on every operation
- *   5. Bounded reconnect with exponential backoff (max 5 attempts, then stops)
- *   6. Graceful "Extension Helper Disconnected" UI state — no hard console crashes
- *   7. Disconnect reason classification (wrong ID / not installed / network / unknown)
+ * Capabilities:
+ * 1. Full chrome API environment guard (works on HTTP + HTTPS, localhost + Vercel)
+ * 2. Extension ID format validation before any connect attempt
+ * 3. Async ping-first handshake — verifies the extension is alive before opening port
+ * 4. chrome.runtime.lastError checked and cleared on every operation
+ * 5. Bounded reconnect with exponential backoff (max 5 attempts, then stops)
+ * 6. Graceful "Extension Helper Disconnected" UI state — no hard console crashes
+ * 7. Disconnect reason classification (wrong ID / not installed / network / unknown)
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -50,16 +51,13 @@ export const DISCONNECT_REASON = {
 
 // ── Chrome API environment detection ─────────────────────────────────────────
 function detectChromeEnvironment() {
-  // Guard 1: Not a browser at all (SSR)
   if (typeof window === 'undefined') {
     return { available: false, reason: DISCONNECT_REASON.NOT_CHROME };
   }
-  // Guard 2: chrome object doesn't exist (Firefox, Safari, etc.)
-  if (typeof chrome === 'undefined' || chrome === null) {
+  if (typeof window.chrome === 'undefined' || window.chrome === null) {
     return { available: false, reason: DISCONNECT_REASON.NOT_CHROME };
   }
-  // Guard 3: chrome.runtime exists but connect may be restricted (non-extension page on HTTP)
-  if (!chrome.runtime || typeof chrome.runtime.connect !== 'function') {
+  if (!window.chrome.runtime || typeof window.chrome.runtime.connect !== 'function') {
     return { available: false, reason: DISCONNECT_REASON.CONTEXT_ERROR };
   }
   return { available: true, reason: null };
@@ -79,13 +77,18 @@ function pingExtension(extensionId) {
     const timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), PING_TIMEOUT_MS);
 
     try {
-      chrome.runtime.sendMessage(
+      if (!window.chrome?.runtime?.sendMessage) {
+        clearTimeout(timer);
+        return resolve({ ok: false, reason: DISCONNECT_REASON.CONTEXT_ERROR });
+      }
+
+      window.chrome.runtime.sendMessage(
         extensionId,
         { type: MSG.GET_EXTENSION_ID },
         (response) => {
           clearTimeout(timer);
-          // Always read and clear lastError to avoid Chrome's "unchecked runtime.lastError" warning
-          const err = chrome.runtime.lastError;
+          // Always read and clear lastError to avoid Chrome's warning exceptions
+          const err = window.chrome.runtime.lastError;
           if (err) {
             const reason = err.message?.includes('Could not establish connection')
               ? DISCONNECT_REASON.NOT_INSTALLED
@@ -107,217 +110,54 @@ function pingExtension(extensionId) {
   });
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // MAIN HOOK
 // ═══════════════════════════════════════════════════════════════════════════════
 export function useExtension(extensionId) {
-
   // ── State ──────────────────────────────────────────────────────────────────
-  const [connected,       setConnected]       = useState(false);
-  const [extAvailable,    setExtAvailable]    = useState(false);
-  const [disconnectReason,setDisconnectReason]= useState(null);   // human-readable string
-  const [jobs,            setJobs]            = useState([]);
-  const [logs,            setLogs]            = useState([]);
-  const [tenders,         setTenders]         = useState([]);
-  const [progress,        setProgress]        = useState({});
-  const [error,           setError]           = useState(null);
-  const [isPaused,        setIsPaused]        = useState(false);
-  const [pingStatus,      setPingStatus]      = useState('idle'); // idle|pinging|ok|fail
+  const [connected, setConnected] = useState(false);
+  const [extAvailable, setExtAvailable] = useState(false);
+  const [disconnectReason, setDisconnectReason] = useState(null); // human-readable string
+  const [jobs, setJobs] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [tenders, setTenders] = useState([]);
+  const [progress, setProgress] = useState({});
+  const [error, setError] = useState(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [pingStatus, setPingStatus] = useState('idle'); // idle|pinging|ok|fail
 
   // ── Refs ───────────────────────────────────────────────────────────────────
-  const portRef           = useRef(null);
-  const reconnectTimer    = useRef(null);
+  const portRef = useRef(null);
+  const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
-  const onTenderCallback  = useRef(null);
-  const isMounted         = useRef(true);   // prevent setState after unmount
+  const onTenderCallback = useRef(null);
+  const isMounted = useRef(true); // prevent setState after unmount
 
   // ── Safe setState helpers ─────────────────────────────────────────────────
   const safe = (fn) => (...args) => { if (isMounted.current) fn(...args); };
 
-  // ── Log helper (defined early — used by connect) ──────────────────────────
+  // ── Log helper ──────────────────────────────────────────────────────────
   const addLog = useCallback((level, message) => {
     if (!message || !isMounted.current) return;
     const entry = {
-      id:      `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       level,
       message: String(message).slice(0, 300),
-      ts:      new Date().toLocaleTimeString('en-IN', { hour12: false }),
+      ts: new Date().toLocaleTimeString('en-IN', { hour12: false }),
     };
     setLogs(prev => [entry, ...prev].slice(0, MAX_LOG_LINES));
   }, []);
 
-
-  // ── Step 1: Detect Chrome API environment on mount ─────────────────────────
-  useEffect(() => {
-    isMounted.current = true;
-    const { available, reason } = detectChromeEnvironment();
-    safe(setExtAvailable)(available);
-    if (!available) {
-      safe(setDisconnectReason)(reason);
-      addLog('warn', `⚠️ ${reason}`);
-    }
-    return () => { isMounted.current = false; };
-  }, []);
-
-
-  // ── Step 2: Ping → Connect when extensionId changes ───────────────────────
-  useEffect(() => {
-    // Clean up any previous connection attempt
-    clearTimeout(reconnectTimer.current);
-    reconnectAttempts.current = 0;
-    disconnectPort();
-
-    if (!extensionId || !extAvailable) return;
-
-    // Validate ID format immediately — no point trying an invalid ID
-    if (!isValidExtensionId(extensionId)) {
-      safe(setDisconnectReason)(DISCONNECT_REASON.WRONG_ID);
-      safe(setError)('Extension ID must be 32 lowercase letters (a–p). Check chrome://extensions.');
-      addLog('error', '❌ Invalid Extension ID format. Chrome IDs are 32 characters, letters a–p only.');
-      return;
-    }
-
-    // Start the ping → connect flow
-    attemptConnection();
-
-    return () => {
-      clearTimeout(reconnectTimer.current);
-      disconnectPort();
-    };
-  }, [extensionId, extAvailable]);
-
-
-  // ── Connection flow ────────────────────────────────────────────────────────
-  async function attemptConnection() {
-    if (!isMounted.current) return;
-
-    // ── Phase A: Ping first ────────────────────────────────────────────────
-    safe(setPingStatus)('pinging');
-    addLog('info', `🔎 Pinging extension${reconnectAttempts.current > 0 ? ` (attempt ${reconnectAttempts.current + 1}/${MAX_RECONNECTS})` : ''}…`);
-
-    const ping = await pingExtension(extensionId.trim());
-
-    if (!isMounted.current) return;
-
-    if (!ping.ok) {
-      safe(setPingStatus)('fail');
-      safe(setConnected)(false);
-      safe(setDisconnectReason)(ping.reason);
-      safe(setError)(ping.reason);
-      addLog('error', `❌ Extension Helper Disconnected — ${ping.reason}`);
-
-      // Decide whether to retry
-      reconnectAttempts.current += 1;
-      if (reconnectAttempts.current >= MAX_RECONNECTS) {
-        addLog('warn', `⏹️ ${DISCONNECT_REASON.MAX_RETRIES}`);
-        safe(setDisconnectReason)(DISCONNECT_REASON.MAX_RETRIES);
-        return; // Stop — user must intervene
-      }
-
-      // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-      const delay = RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts.current - 1);
-      addLog('info', `⏳ Retrying in ${delay / 1000}s…`);
-      reconnectTimer.current = setTimeout(attemptConnection, delay);
-      return;
-    }
-
-    // Ping succeeded — extension is alive and responding
-    addLog('success', `✅ Extension confirmed alive (v${ping.version || '?'})`);
-    safe(setPingStatus)('ok');
-
-    // ── Phase B: Open long-lived port ─────────────────────────────────────
-    openPort();
-  }
-
-  function openPort() {
-    if (!isMounted.current) return;
-
-    // Guard: chrome API still available
-    if (typeof chrome === 'undefined' || !chrome.runtime?.connect) {
-      safe(setDisconnectReason)(DISCONNECT_REASON.CONTEXT_ERROR);
-      return;
-    }
-
-    try {
-      const port = chrome.runtime.connect(extensionId.trim(), { name: PORT_NAME });
-
-      // Chrome sets lastError synchronously if connect fails (e.g. wrong ID despite ping)
-      // Read and clear it immediately after connect
-      const connectErr = chrome.runtime.lastError;
-      if (connectErr) {
-        throw new Error(connectErr.message);
-      }
-
-      portRef.current = port;
-      reconnectAttempts.current = 0; // reset backoff on successful connection
-
-      port.onMessage.addListener(handlePortMessage);
-
-      port.onDisconnect.addListener(() => {
-        // Read lastError to clear it — required by Chrome API contract
-        const disconnErr = chrome.runtime.lastError;
-        const reason = disconnErr?.message || DISCONNECT_REASON.NETWORK;
-
-        safe(setConnected)(false);
-        portRef.current = null;
-
-        if (!isMounted.current) return;
-
-        // Classify the disconnect
-        const isRecoverable =
-          reason.includes('Service Worker') ||
-          reason.includes('network') ||
-          !disconnErr; // clean disconnect (no error = SW restart)
-
-        if (isRecoverable) {
-          addLog('warn', `🔌 Extension disconnected (${reason}). Reconnecting…`);
-          safe(setDisconnectReason)(DISCONNECT_REASON.NETWORK);
-          reconnectTimer.current = setTimeout(attemptConnection, RECONNECT_BASE_MS);
-        } else {
-          // Non-recoverable (wrong ID, extension removed)
-          addLog('error', `❌ Extension Helper Disconnected — ${reason}`);
-          safe(setDisconnectReason)(reason);
-          safe(setError)(reason);
-        }
-      });
-
-      safe(setConnected)(true);
-      safe(setError)(null);
-      safe(setDisconnectReason)(null);
-      addLog('success', '✅ Long-lived port open — GeM Aggregator Engine connected');
-
-      // Request initial status
-      safePostMessage({ type: MSG.GET_STATUS });
-
-    } catch (err) {
-      safe(setConnected)(false);
-      const reason = err.message?.includes('Could not establish')
-        ? DISCONNECT_REASON.NOT_INSTALLED
-        : err.message || DISCONNECT_REASON.UNKNOWN;
-
-      safe(setDisconnectReason)(reason);
-      safe(setError)(reason);
-      addLog('error', `❌ Port open failed — ${reason}`);
-
-      // Retry if within limit
-      reconnectAttempts.current += 1;
-      if (reconnectAttempts.current < MAX_RECONNECTS) {
-        const delay = RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts.current - 1);
-        reconnectTimer.current = setTimeout(attemptConnection, delay);
-      }
-    }
-  }
-
-  function disconnectPort() {
+  // ── Port Teardown Handler ──────────────────────────────────────────────────
+  const disconnectPort = useCallback(() => {
     if (portRef.current) {
       try { portRef.current.disconnect(); } catch { /* ignore */ }
       portRef.current = null;
     }
-  }
+  }, []);
 
   // ── Safe port postMessage ─────────────────────────────────────────────────
-  function safePostMessage(msg) {
+  const safePostMessage = useCallback((msg) => {
     if (!portRef.current) return false;
     try {
       portRef.current.postMessage(msg);
@@ -326,14 +166,13 @@ export function useExtension(extensionId) {
       addLog('warn', `Port send failed: ${err.message}`);
       return false;
     }
-  }
+  }, [addLog]);
 
   // ── Port message handler ──────────────────────────────────────────────────
-  function handlePortMessage(msg) {
+  const handlePortMessage = useCallback((msg) => {
     if (!msg?.type) return;
 
     switch (msg.type) {
-
       case MSG.STREAM_TENDER: {
         const tender = msg.payload;
         if (!tender?.bidId) break;
@@ -342,7 +181,9 @@ export function useExtension(extensionId) {
           return [tender, ...prev].slice(0, 5000);
         });
         upsertManyTenders([tender]).catch(() => {});
-        onTenderCallback.current?.(tender);
+        if (typeof onTenderCallback.current === 'function') {
+          onTenderCallback.current(tender);
+        }
         addLog('success', `📄 Captured: ${tender.bidId} — ${tender.title?.slice(0, 50)}`);
         break;
       }
@@ -357,6 +198,9 @@ export function useExtension(extensionId) {
           return [...newOnes, ...prev].slice(0, 5000);
         });
         upsertManyTenders(batch).catch(() => {});
+        if (typeof onTenderCallback.current === 'function' && batch.length > 0) {
+          onTenderCallback.current(batch[0]); 
+        }
         addLog('success', `📦 Batch received: ${batch.length} contracts`);
         break;
       }
@@ -414,7 +258,162 @@ export function useExtension(extensionId) {
         // Unknown message type — log at debug level, don't crash
         addLog('debug', `Unknown message type: ${msg.type}`);
     }
-  }
+  }, [addLog]);
+
+  // ── Core Open Connection Engine Block ──────────────────────────────────────
+  const openPort = useCallback(() => {
+    if (!isMounted.current) return;
+    if (typeof window.chrome === 'undefined' || !window.chrome.runtime?.connect) {
+      safe(setDisconnectReason)(DISCONNECT_REASON.CONTEXT_ERROR);
+      return;
+    }
+
+    try {
+      const port = window.chrome.runtime.connect(extensionId.trim(), { name: PORT_NAME });
+
+      // Check and clear lastError synchronously
+      const connectErr = window.chrome.runtime.lastError;
+      if (connectErr) {
+        throw new Error(connectErr.message);
+      }
+
+      portRef.current = port;
+      reconnectAttempts.current = 0; // reset backoff on successful connection
+
+      port.onMessage.addListener(handlePortMessage);
+
+      port.onDisconnect.addListener(() => {
+        // Read lastError to clear it — required by Chrome API contract
+        const disconnErr = window.chrome.runtime.lastError;
+        const reason = disconnErr?.message || DISCONNECT_REASON.NETWORK;
+
+        safe(setConnected)(false);
+        portRef.current = null;
+
+        if (!isMounted.current) return;
+
+        // Classify the disconnect
+        const isRecoverable =
+          reason.includes('Service Worker') ||
+          reason.includes('network') ||
+          !disconnErr; // clean disconnect (no error = SW restart)
+
+        if (isRecoverable) {
+          addLog('warn', `🔌 Extension disconnected (${reason}). Reconnecting…`);
+          safe(setDisconnectReason)(DISCONNECT_REASON.NETWORK);
+          reconnectTimer.current = setTimeout(attemptConnection, RECONNECT_BASE_MS);
+        } else {
+          // Non-recoverable (wrong ID, extension removed)
+          addLog('error', `❌ Extension Helper Disconnected — ${reason}`);
+          safe(setDisconnectReason)(reason);
+          safe(setError)(reason);
+        }
+      });
+
+      safe(setConnected)(true);
+      safe(setError)(null);
+      safe(setDisconnectReason)(null);
+      addLog('success', '✅ Long-lived port open — GeM Aggregator Engine connected');
+      
+      // Request initial status
+      port.postMessage({ type: MSG.GET_STATUS });
+
+    } catch (err) {
+      safe(setConnected)(false);
+      const reason = err.message?.includes('Could not establish')
+        ? DISCONNECT_REASON.NOT_INSTALLED
+        : err.message || DISCONNECT_REASON.UNKNOWN;
+
+      safe(setDisconnectReason)(reason);
+      safe(setError)(reason);
+      addLog('error', `❌ Port open failed — ${reason}`);
+
+      // Retry if within limit
+      reconnectAttempts.current += 1;
+      if (reconnectAttempts.current < MAX_RECONNECTS) {
+        const delay = RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts.current - 1);
+        reconnectTimer.current = setTimeout(attemptConnection, delay);
+      }
+    }
+  }, [extensionId, handlePortMessage, addLog]);
+
+  // ── Orchestrate Handshake & Connection Execution Loops ────────────────────
+  const attemptConnection = useCallback(async () => {
+    if (!isMounted.current) return;
+
+    // ── Phase A: Ping first ────────────────────────────────────────────────
+    safe(setPingStatus)('pinging');
+    addLog('info', `🔎 Pinging extension${reconnectAttempts.current > 0 ? ` (attempt ${reconnectAttempts.current + 1}/${MAX_RECONNECTS})` : ''}…`);
+
+    const ping = await pingExtension(extensionId.trim());
+
+    if (!isMounted.current) return;
+
+    if (!ping.ok) {
+      safe(setPingStatus)('fail');
+      safe(setConnected)(false);
+      safe(setDisconnectReason)(ping.reason);
+      safe(setError)(ping.reason);
+      addLog('error', `❌ Extension Helper Disconnected — ${ping.reason}`);
+
+      // Decide whether to retry
+      reconnectAttempts.current += 1;
+      if (reconnectAttempts.current >= MAX_RECONNECTS) {
+        addLog('warn', `⏹️ ${DISCONNECT_REASON.MAX_RETRIES}`);
+        safe(setDisconnectReason)(DISCONNECT_REASON.MAX_RETRIES);
+        return; // Stop — operator must intervene
+      }
+
+      // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+      const delay = RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts.current - 1);
+      addLog('info', `⏳ Retrying in ${delay / 1000}s…`);
+      reconnectTimer.current = setTimeout(attemptConnection, delay);
+      return;
+    }
+
+    // Ping succeeded — extension is alive and responding
+    addLog('success', `✅ Extension confirmed alive (v${ping.version || '?'})`);
+    safe(setPingStatus)('ok');
+
+    // ── Phase B: Open long-lived port ─────────────────────────────────────
+    openPort();
+  }, [extensionId, openPort, addLog]);
+
+  // ── Step 1: Detect Chrome API environment on mount ─────────────────────────
+  useEffect(() => {
+    isMounted.current = true;
+    const { available, reason } = detectChromeEnvironment();
+    safe(setExtAvailable)(available);
+    if (!available) {
+      safe(setDisconnectReason)(reason);
+      addLog('warn', `⚠️ ${reason}`);
+    }
+    return () => { isMounted.current = false; };
+  }, [addLog]);
+
+  // ── Step 2: Ping → Connect when extensionId changes ───────────────────────
+  useEffect(() => {
+    clearTimeout(reconnectTimer.current);
+    reconnectAttempts.current = 0;
+    disconnectPort();
+
+    if (!extensionId || !extAvailable) return;
+
+    // Validate ID format immediately
+    if (!isValidExtensionId(extensionId)) {
+      safe(setDisconnectReason)(DISCONNECT_REASON.WRONG_ID);
+      safe(setError)('Extension ID must be 32 lowercase letters (a–p). Check chrome://extensions.');
+      addLog('error', '❌ Invalid Extension ID format. Chrome IDs are 32 characters, letters a–p only.');
+      return;
+    }
+
+    attemptConnection();
+
+    return () => {
+      clearTimeout(reconnectTimer.current);
+      disconnectPort();
+    };
+  }, [extensionId, extAvailable, attemptConnection, disconnectPort, addLog]);
 
   // ── Public actions ─────────────────────────────────────────────────────────
   const startScrape = useCallback((config) => {
@@ -429,21 +428,21 @@ export function useExtension(extensionId) {
       }`);
     }
     return sent;
-  }, [connected]);
+  }, [connected, safePostMessage, addLog]);
 
   const stopScrape = useCallback((jobId) => {
     safePostMessage({ type: MSG.STOP_SCRAPE, payload: { jobId } });
     addLog('warn', jobId ? `⏹️ Stopping job ${jobId}` : '⏹️ Stopping all jobs');
-  }, []);
+  }, [safePostMessage, addLog]);
 
   const retryFailed = useCallback(() => {
     safePostMessage({ type: MSG.RETRY_FAILED });
     addLog('info', '🔄 Retrying all failed jobs…');
-  }, []);
+  }, [safePostMessage, addLog]);
 
   const refreshStatus = useCallback(() => {
     safePostMessage({ type: MSG.GET_STATUS });
-  }, []);
+  }, [safePostMessage]);
 
   const manualReconnect = useCallback(() => {
     reconnectAttempts.current = 0;
@@ -451,7 +450,7 @@ export function useExtension(extensionId) {
     disconnectPort();
     addLog('info', '🔄 Manual reconnect triggered…');
     attemptConnection();
-  }, [extensionId, extAvailable]);
+  }, [attemptConnection, disconnectPort, addLog]);
 
   const onTender = useCallback((cb) => {
     onTenderCallback.current = cb;
@@ -459,19 +458,16 @@ export function useExtension(extensionId) {
 
   // ── Return public API ──────────────────────────────────────────────────────
   return {
-    // Connection state
     connected,
     extAvailable,
     disconnectReason,
     pingStatus,
     error,
-    // Data
     jobs,
     logs,
     tenders,
     progress,
     isPaused,
-    // Actions
     startScrape,
     stopScrape,
     retryFailed,

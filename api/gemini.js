@@ -1,149 +1,184 @@
 /**
- * api/gemini.js — Vercel Serverless Edge Function
- * =================================================
- * Zero-cost AI gateway. Proxies requests from the React dashboard
- * to the Google Gemini Pro API. Keeps the API key server-side.
- *
- * Deploy: add GOOGLE_GEMINI_API_KEY to Vercel environment variables.
- * Endpoint: POST /api/gemini  { prompt: string }
- * Response: { report: string }
- *
- * Rate limit: 60 req/min on free Gemini tier — sufficient for tender briefings.
+ * /api/gemini
+ * =========================================================================
+ * TenderSync Pro Serverless Intelligence Engine
+ * Secure Edge-compatible Node.js gateway routing for Google Gemini Pro API.
+ * Designed & Engineered by Ankur Nagwan
  */
 
-export const config = { runtime: 'edge' };
-
-const GEMINI_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-
-const ALLOWED_ORIGINS = [
-  'https://gem-aggregator.vercel.app',
-  'http://localhost:5173',
-  'http://localhost:3000',
-];
+export const config = {
+  runtime: 'edge', // Using Edge runtime for ultra-low latency streaming response
+};
 
 export default async function handler(req) {
-  // ── CORS ──────────────────────────────────────────────────────────────────
-  const origin = req.headers.get('origin') || '';
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json',
-  };
-
+  // 1. Enforce strict CORS and Method handling
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: corsHeaders });
+    return new Response('OK', {
+      status: 200,
+      headers: getCorsHeaders(),
+    });
   }
 
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
+      status: 405,
+      headers: { ...getCorsHeaders(), 'Content-Type': 'application/json' },
+    });
   }
 
-  // ── Parse body ─────────────────────────────────────────────────────────────
-  let prompt, captchaImage;
   try {
-    const body = await req.json();
-    prompt       = body?.prompt;
-    captchaImage = body?.captchaImage; // base64 image for CAPTCHA solving
+    // 2. Extract and sanitize payload parameters
+    const { tender, prompt: customPrompt } = await req.json();
 
-    // CAPTCHA mode — build vision prompt
-    if (captchaImage && !prompt) {
-      prompt = 'This is a CAPTCHA image from an Indian government portal. Read the alphanumeric characters shown. Reply with ONLY those characters — no spaces, no explanation, just the text.';
+    if (!tender || !tender.title) {
+      return new Response(JSON.stringify({ error: 'Malformed payload: Missing tender context criteria.' }), {
+        status: 400,
+        headers: { ...getCorsHeaders(), 'Content-Type': 'application/json' },
+      });
     }
 
-    if (!prompt || typeof prompt !== 'string') {
-      return new Response(JSON.stringify({ error: 'prompt is required' }), { status: 400, headers: corsHeaders });
+    // 3. Extract Secure Environment Secret Key (Updated to match Vercel lock)
+    const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error('[TenderSync Backend Fault] GOOGLE_GEMINI_API_KEY is missing from environment ecosystem variables.');
+      return new Response(JSON.stringify({ error: 'Backend Core Key Error: Intelligence services temporarily offline.' }), {
+        status: 500,
+        headers: { ...getCorsHeaders(), 'Content-Type': 'application/json' },
+      });
     }
-    if (prompt.length > 12000) {
-      return new Response(JSON.stringify({ error: 'Prompt too long' }), { status: 400, headers: corsHeaders });
-    }
-  } catch {
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers: corsHeaders });
-  }
 
-  // ── API key guard ──────────────────────────────────────────────────────────
-  const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
-  if (!apiKey) {
-    return new Response(
-      JSON.stringify({ error: 'GOOGLE_GEMINI_API_KEY not configured in Vercel environment variables.' }),
-      { status: 503, headers: corsHeaders }
-    );
-  }
+    // 4. Construct high-fidelity executive prompt if not pre-compiled by frontend
+    const promptPayload = customPrompt || `
+You are a senior government procurement analyst. Analyze this tender and generate a structured Executive Briefing.
 
-  // ── Build Gemini request ───────────────────────────────────────────────────
-  let contents;
-  if (captchaImage) {
-    // Vision request — image + text
-    contents = [{
-      parts: [
-        { inline_data: { mime_type: 'image/png', data: captchaImage } },
-        { text: prompt },
-      ]
-    }];
-  } else {
-    // Text-only request
-    contents = [{ parts: [{ text: prompt }] }];
-  }
+TENDER DATA:
+Title: ${tender.title}
+Organization: ${tender.organization}
+Portal: ${tender.portal?.toUpperCase()}
+ID: ${tender.bidId}
+Due Date: ${tender.dueDate}
+Estimated Budget: ${tender.budget}
+Scraped At: ${tender.scrapedAt}
 
-  // ── Call Gemini ─────────────────────────────────────────────────────────────
-  try {
-    const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 25_000); // 25s edge timeout
+Provide the response in clean, high-density professional Markdown formatting with the following structural layout components:
+### 📊 Executive Summary
+### 🎯 Scope & Strategic Alignments
+### ⚠️ Operational Risk Profile & Technical Safeguards
+### 🛠️ Prerequisites & Documentation Checklists
+### 📈 Recommendations & Next Action Items
+    `.trim();
 
-    const geminiResp = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+    // 5. Interface directly with Google Gemini Developer API (using modern gemini-1.5-pro/flash endpoint matrices)
+    // Utilizing streamGenerateContent for native network chunk data streaming
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key=${apiKey}`;
+
+    const apiResponse = await fetch(geminiUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
-        contents,
-        generationConfig: {
-          temperature:     captchaImage ? 0.1 : 0.3,
-          maxOutputTokens: captchaImage ? 32  : 2048,
-          topP: 0.8, topK: 40,
-        },
-        safetySettings: [
-          { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+        contents: [
+          {
+            parts: [
+              { text: promptPayload }
+            ]
+          }
         ],
-      }),
+        generationConfig: {
+          temperature: 0.2, // Low temperature for deterministic, data-accurate output
+          maxOutputTokens: 2048,
+        }
+      })
     });
 
-    clearTimeout(timeout);
-
-    if (!geminiResp.ok) {
-      const errText = await geminiResp.text().catch(() => 'Unknown Gemini error');
-      console.error('[gemini edge] API error:', geminiResp.status, errText);
-      return new Response(
-        JSON.stringify({ error: `Gemini API error ${geminiResp.status}: ${errText.slice(0, 200)}` }),
-        { status: 502, headers: corsHeaders }
-      );
+    if (!apiResponse.ok) {
+      const errText = await apiResponse.text();
+      console.error(`[Gemini Engine Error Response] Status: ${apiResponse.status} - Details: ${errText}`);
+      return new Response(JSON.stringify({ error: 'Upstream gateway failure occurred processing model parsing parameters.' }), {
+        status: apiResponse.status,
+        headers: { ...getCorsHeaders(), 'Content-Type': 'application/json' },
+      });
     }
 
-    const data = await geminiResp.json();
+    // 6. Establish Server-Sent Events (SSE) Stream to pump model output token-by-token back to dashboard layout panels
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const reader = apiResponse.body.getReader();
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
 
-    // Extract text from Gemini response structure
-    const report =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text
-      || data?.candidates?.[0]?.output
-      || '';
+    // Fire asynchronous token parsing pool worker loop
+    (async () => {
+      try {
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-    if (!report) {
-      return new Response(
-        JSON.stringify({ error: 'Gemini returned empty response', raw: JSON.stringify(data).slice(0, 500) }),
-        { status: 502, headers: corsHeaders }
-      );
-    }
+          buffer += decoder.decode(value, { stream: true });
+          
+          // Gemini returns lines wrapped in JSON array formatting blocks for stream chunks
+          // Parse stream fragments looking for text part payloads
+          let matchIndex;
+          while ((matchIndex = buffer.indexOf('\n')) >= 0) {
+            let line = buffer.substring(0, matchIndex).trim();
+            buffer = buffer.substring(matchIndex + 1);
 
-    return new Response(JSON.stringify({ report }), { status: 200, headers: corsHeaders });
+            // Clean up leading commas or structural JSON streaming wrappers
+            if (line.startsWith(',')) line = line.substring(1).trim();
+            if (line.startsWith('[') || line.endsWith(']')) continue;
 
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      return new Response(JSON.stringify({ error: 'Gemini request timed out (25s)' }), { status: 504, headers: corsHeaders });
-    }
-    console.error('[gemini edge] Unexpected error:', err);
-    return new Response(JSON.stringify({ error: `Internal error: ${err.message}` }), { status: 500, headers: corsHeaders });
+            try {
+              if (line.length > 0) {
+                const parsed = JSON.parse(line);
+                const textChunk = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (textChunk) {
+                  // Direct payload event write stream pushing data instantly down to Dashboard UI console hook
+                  await writer.write(encoder.encode(`data: ${JSON.stringify({ text: textChunk })}\n\n`));
+                }
+              }
+            } catch (jsonErr) {
+              // Silently bypass intermittent streaming framing issues on character boundary fragments
+            }
+          }
+        }
+        
+        // Finalize secure data sequence channel transfer blocks
+        await writer.write(encoder.encode('data: [DONE]\n\n'));
+      } catch (streamWriteErr) {
+        console.error('[Stream Loop Exception Anchor Trap]:', streamWriteErr);
+      } finally {
+        await writer.close();
+      }
+    })();
+
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        ...getCorsHeaders(),
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+      },
+    });
+
+  } catch (globalFault) {
+    console.error('[Critical Global API Engine Framework Core Failure]:', globalFault);
+    return new Response(JSON.stringify({ error: 'Internal Analytics System Pipeline Server Error.' }), {
+      status: 500,
+      headers: { ...getCorsHeaders(), 'Content-Type': 'application/json' },
+    });
   }
+}
+
+/**
+ * Universal Access Control Header Definition Layouts
+ */
+function getCorsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
 }

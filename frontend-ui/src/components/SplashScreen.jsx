@@ -5,13 +5,13 @@
  * Stays visible for exactly 15 seconds, then fades out and calls onComplete().
  *
  * Shows:
- *   ✦ Animated tech-shield SVG logo (draw-on stroke, circuit nodes, scan line)
- *   ✦ TENDERSYNC PRO title with staggered text reveal
- *   ✦ Tagline: Enterprise AI Procurement Suite
- *   ✦ Developer credit: Designed & Engineered By Ankur Nagwan
- *   ✦ Version badge: v2.0 — Enterprise Edition
- *   ✦ Live progress bar with stage labels and countdown timer
- *   ✦ Animated dot-grid background + corner accent lines
+ * ✦ Animated tech-shield SVG logo (draw-on stroke, circuit nodes, scan line)
+ * ✦ TENDERSYNC PRO title with staggered text reveal
+ * ✦ Tagline: Enterprise AI Procurement Suite
+ * ✦ Developer credit: Designed & Engineered By Ankur Nagwan
+ * ✦ Version badge: v2.0 — Enterprise Edition
+ * ✦ Live progress bar with stage labels and countdown timer
+ * ✦ Animated dot-grid background + corner accent lines
  */
 
 import { useEffect, useState, useRef } from 'react';
@@ -43,12 +43,12 @@ const WIRE_PATHS = [
 ];
 
 export default function SplashScreen({ onComplete }) {
-  const [progress,    setProgress]    = useState(0);
-  const [stageLabel,  setStageLabel]  = useState(LOAD_STAGES[0].label);
-  const [fading,      setFading]      = useState(false);
-  const [shieldIn,    setShieldIn]    = useState(false);
-  const [textIn,      setTextIn]      = useState(false);
-  const [progressIn,  setProgressIn]  = useState(false);
+  const [progress,      setProgress]    = useState(0);
+  const [stageLabel,    setStageLabel]  = useState(LOAD_STAGES[0].label);
+  const [fading,        setFading]      = useState(false);
+  const [shieldIn,      setShieldIn]    = useState(false);
+  const [textIn,        setTextIn]      = useState(false);
+  const [progressIn,    setProgressIn]  = useState(false);
 
   const startRef = useRef(null);
   const rafRef   = useRef(null);
@@ -56,8 +56,12 @@ export default function SplashScreen({ onComplete }) {
 
   useEffect(() => {
     startRef.current = performance.now();
+    let isMounted = true;
 
-    const t = (fn, ms) => { const id = setTimeout(fn, ms); timers.current.push(id); };
+    const t = (fn, ms) => { 
+      const id = setTimeout(() => { if (isMounted) fn(); }, ms); 
+      timers.current.push(id); 
+    };
 
     t(() => setShieldIn(true),    250);
     t(() => setTextIn(true),      900);
@@ -69,13 +73,17 @@ export default function SplashScreen({ onComplete }) {
     t(() => onComplete?.(),      TOTAL_MS);
 
     const tick = (now) => {
+      if (!isMounted) return;
       const elapsed = now - startRef.current;
       setProgress(Math.min((elapsed / TOTAL_MS) * 100, 100));
-      if (elapsed < TOTAL_MS) rafRef.current = requestAnimationFrame(tick);
+      if (elapsed < TOTAL_MS) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
     };
     rafRef.current = requestAnimationFrame(tick);
 
     return () => {
+      isMounted = false;
       timers.current.forEach(clearTimeout);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
@@ -296,7 +304,7 @@ export default function SplashScreen({ onComplete }) {
               marginTop:12, fontSize:15, color:'#64748b', letterSpacing:'0.8px',
               animation: textIn ? 'ts-fade-up .6s ease .45s both' : 'none',
             }}>
-              Designed &amp; Engineered By{' '}
+              Designed & Engineered By{' '}
               <span style={{ color:'#60a5fa', fontWeight:700 }}>Ankur Nagwan</span>
             </div>
           </div>
@@ -310,7 +318,7 @@ export default function SplashScreen({ onComplete }) {
             {/* Label + percent */}
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
               <span style={{
-                fontSize:10, color:'#475569', letterSpacing:'.5px', fontFamily:'monospace',
+                fontSize:10, color:'#94a3b8', letterSpacing:'.5px', fontFamily:'monospace',
                 animation:'ts-label-blink 1.6s ease-in-out infinite',
               }}>
                 {stageLabel}
@@ -347,7 +355,7 @@ export default function SplashScreen({ onComplete }) {
             {/* Time remaining */}
             <div style={{
               textAlign:'right', marginTop:6,
-              fontSize:10, color:'#334155', fontFamily:'monospace',
+              fontSize:10, color:'#475569', fontFamily:'monospace',
             }}>
               {secondsLeft > 0 ? `${secondsLeft}s remaining` : 'Launching dashboard…'}
             </div>
@@ -369,3 +377,6 @@ export default function SplashScreen({ onComplete }) {
     </>
   );
 }
+
+// ── Styles ─────────────────────────────────────────────────────────────────────
+const styles = {};

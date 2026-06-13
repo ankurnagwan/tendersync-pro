@@ -1,83 +1,66 @@
 ﻿{
   "manifest_version": 3,
-  "name": "TenderSync Pro â€” Scraper Engine",
-  "short_name": "TenderSync",
+  "name": "TenderSync Pro - Aggregator Helper",
   "version": "3.0.0",
-  "description": "Procurement intelligence engine: GeM Bids, TendersOnTime, Tender247",
-
-  "icons": {
-    "16":  "icons/icon16.png",
-    "32":  "icons/icon32.png",
-    "48":  "icons/icon48.png",
-    "128": "icons/icon128.png"
+  "description": "Enterprise background automation utility worker for real-time tender data streams, CAPTCHA interception, and telemetry sync.",
+  "author": "Ankur Nagwan",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "storage",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://bidplus.gem.gov.in/*",
+    "https://www.tendersontime.com/*",
+    "https://www.tender247.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
   },
-
   "action": {
     "default_popup": "popup.html",
-    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" },
-    "default_title": "TenderSync Pro"
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
-
-  "background": {
-    "service_worker": "background.js"
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
-
   "content_scripts": [
     {
       "matches": [
-        "https://gem.gov.in/*",
-        "https://mkp.gem.gov.in/*",
         "https://bidplus.gem.gov.in/*",
         "https://www.tendersontime.com/*",
-        "https://tendersontime.com/*",
-        "https://www.tender247.com/*",
-        "https://tender247.com/*"
+        "https://www.tender247.com/*"
       ],
-      "js": ["utils/constants.js", "utils/dom_utils.js", "content.js"],
-      "css": ["content_overlay.css"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }
   ],
-
-  "permissions": [
-    "tabs", "activeTab", "storage", "downloads",
-    "scripting", "webRequest", "cookies", "alarms", "notifications"
-  ],
-
-  "host_permissions": [
-    "https://gem.gov.in/*",
-    "https://mkp.gem.gov.in/*",
-    "https://bidplus.gem.gov.in/*",
-    "https://www.tendersontime.com/*",
-    "https://tendersontime.com/*",
-    "https://www.tender247.com/*",
-    "https://tender247.com/*",
-    "https://*.vercel.app/*",
-    "http://localhost/*"
-  ],
-
   "externally_connectable": {
     "matches": [
-      "https://*.vercel.app/*",
-      "http://localhost:5173/*",
-      "http://localhost:3000/*",
-      "http://localhost:4173/*",
-      "http://127.0.0.1:5173/*",
-      "http://127.0.0.1:3000/*",
-      "http://127.0.0.1:4173/*"
+      "http://localhost/*",
+      "https://*.vercel.app/*"
     ]
   },
-
   "web_accessible_resources": [
     {
-      "resources": ["icons/*.png", "utils/constants.js", "utils/dom_utils.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "icons/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
-  ],
-
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'"
-  }
+  ]
 }
-
