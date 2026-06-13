@@ -1,6 +1,6 @@
-{
+﻿{
   "manifest_version": 3,
-  "name": "TenderSync Pro — Scraper Engine",
+  "name": "TenderSync Pro â€” Scraper Engine",
   "short_name": "TenderSync",
   "version": "3.0.0",
   "description": "Procurement intelligence engine: GeM Bids, TendersOnTime, Tender247",
@@ -19,8 +19,7 @@
   },
 
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
 
   "content_scripts": [
@@ -81,3 +80,4 @@
     "extension_pages": "script-src 'self'; object-src 'self'"
   }
 }
+
