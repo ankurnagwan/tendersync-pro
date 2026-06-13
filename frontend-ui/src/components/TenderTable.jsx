@@ -4,8 +4,8 @@
  * Production-grade Enterprise Analytics Data Table Grid for Tender Sync Pro.
  * Engineered with dynamic pagination, deep multi-dimensional data filtering,
  * advanced responsive layouts, and contextual action controllers.
- * * Design Standards: Optimized for High-Density Professional Dashboards.
- * Codebase Architecture Author: Ankur Nagwan
+ * - Design Standards: Optimized for High-Density Professional Dashboards.
+ * - Synchronized and Engineered by Ankur Nagwan
  */
 
 import { useState, useMemo, useCallback } from 'react';
@@ -160,8 +160,8 @@ export default function TenderTable({
     const targetDate = new Date(dateStr);
     const currentDate = new Date();
     // Zero out clock time metrics to compute accurate absolute day deltas
-    targetDate.setHours(0,0,0,0);
-    currentDate.setHours(0,0,0,0);
+    targetDate.setHours(0, 0, 0, 0);
+    currentDate.setHours(0, 0, 0, 0);
     return Math.ceil((targetDate - currentDate) / 86400000);
   };
 
@@ -482,8 +482,8 @@ const styles = {
   toolbarRight: { display: 'flex', gap: 10, alignItems: 'center' },
   searchWrap: { position: 'relative', display: 'flex', alignItems: 'center' },
   searchIcon: { position: 'absolute', left: 12, fontSize: 13, color: '#64748b', pointerEvents: 'none' },
-  searchInput: { background: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '7px 12px 7px 34px', color: '#f8fafc', fontSize: 13, outline: 'none', width: 220, transition: 'all 0.2s', ':focus': { borderColor: '#3b82f6' } },
-  clearMiniBtn: { position: 'absolute', right: 8, background: 'none', border: 'none', color: '#64748b', fontSize: 16, cursor: 'pointer', padding: 0, ':hover': { color: '#f8fafc' } },
+  searchInput: { background: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '7px 12px 7px 34px', color: '#f8fafc', fontSize: 13, outline: 'none', width: 220, transition: 'all 0.2s' },
+  clearMiniBtn: { position: 'absolute', right: 8, background: 'none', border: 'none', color: '#64748b', fontSize: 16, cursor: 'pointer', padding: 0 },
   select: { background: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '7px 12px', color: '#f8fafc', fontSize: 13, outline: 'none', cursor: 'pointer', transition: 'all 0.2s' },
   resultCount: { fontSize: 13, color: '#94a3b8' },
   selectedCountBadge: { marginLeft: 8, background: 'rgba(59,130,246,0.15)', color: '#60a5fa', padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600, border: '1px solid rgba(59,130,246,0.25)' },
@@ -496,4 +496,20 @@ const styles = {
   td: { padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)', verticalAlign: 'middle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#cbd5e1' },
   checkboxInput: { width: 15, height: 15, accentColor: '#3b82f6', cursor: 'pointer' },
   badge: { display: 'inline-flex', alignItems: 'center', padding: '3px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600, letterSpacing: '0.3px', whiteSpace: 'nowrap' },
-  titleBtn: { background: 'none', border: 'none', color: '#f1f5f9', fontSize: 13, fontWeight
+  titleBtn: { background: 'none', border: 'none', color: '#f1f5f9', fontSize: 13, fontWeight: 500, textAlign: 'left', padding: 0, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%', display: 'block', transition: 'color 0.15s', ':hover': { color: '#3b82f6', textDecoration: 'underline' } },
+  dateCellWrap: { display: 'flex', flexDirection: 'column', gap: 2 },
+  daysDelta: { fontSize: 10, whiteSpace: 'nowrap' },
+  docCountBadge: { display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, minWidth: 20 },
+  actionCluster: { display: 'flex', gap: 6, alignItems: 'center' },
+  actionBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 6, background: '#0f172a', border: '1px solid', fontSize: 12, cursor: 'pointer', transition: 'all 0.15s' },
+  emptyCell: { padding: '60px 0', textAlign: 'center', background: '#0f172a' },
+  emptyState: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' },
+  emptyTxtHeading: { fontSize: 16, fontWeight: 600, color: '#f8fafc', marginBottom: 4 },
+  emptyTxtSub: { fontSize: 13, color: '#64748b' },
+  pagination: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', background: '#1e293b', borderTop: '1px solid rgba(255,255,255,0.08)' },
+  pageInfoSide: { fontSize: 13, color: '#94a3b8' },
+  pageBtnCluster: { display: 'flex', gap: 6, alignItems: 'center' },
+  pageBtn: { background: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', color: '#cbd5e1', padding: '4px 10px', borderRadius: 6, fontSize: 14, cursor: 'pointer', transition: 'all 0.15s', ':disabled': { opacity: 0.3, cursor: 'not-allowed' } },
+  pageIndicatorContainer: { display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' },
+  pageActiveIndex: { background: '#3b82f6', color: '#ffffff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }
+};

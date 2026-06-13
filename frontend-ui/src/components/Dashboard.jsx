@@ -85,7 +85,11 @@ function CredentialRow({ portal, label }) {
     try {
       chrome.runtime.sendMessage({ type: 'GET_CREDENTIALS', payload: { portal } }, resp => {
         if (chrome.runtime.lastError) return;
-        if (resp?.creds?.username) { setUser(resp.creds.username); setPass(resp.creds.password || ''); setSaved(true); }
+        if (resp?.creds?.username) { 
+          setUser(resp.creds.username); 
+          setPass(resp.creds.password || ''); 
+          setSaved(true); 
+        }
       });
     } catch {}
   }, [portal]);
@@ -94,7 +98,8 @@ function CredentialRow({ portal, label }) {
     if (!user.trim()) return;
     try {
       chrome.runtime.sendMessage({ type: 'SAVE_CREDENTIALS', payload: { portal, username: user.trim(), password: pass } }, () => {
-        setSaved(true); setExpanded(false);
+        setSaved(true); 
+        setExpanded(false);
       });
     } catch {}
   };
@@ -102,35 +107,48 @@ function CredentialRow({ portal, label }) {
   const clear = () => {
     try {
       chrome.runtime.sendMessage({ type: 'CLEAR_CREDENTIALS', payload: { portal } }, () => {
-        setUser(''); setPass(''); setSaved(false);
+        setUser(''); 
+        setPass(''); 
+        setSaved(false);
       });
     } catch {}
   };
 
-  const iStyle = { width:'100%', background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', borderRadius:5, padding:'5px 8px', color:'#f8fafc', fontSize:11, outline:'none', marginTop:3, fontFamily:'inherit', boxSizing:'border-box' };
+  const iStyle = { 
+    width: '100%', 
+    background: 'rgba(255,255,255,0.05)', 
+    border: '1px solid rgba(255,255,255,0.1)', 
+    borderRadius: 5, 
+    padding: '5px 8px', 
+    color: '#f8fafc', 
+    fontSize: 11, 
+    outline: 'none', 
+    marginTop: 3, 
+    fontFamily: 'inherit', 
+    boxSizing: 'border-box' 
+  };
 
   return (
-    <div style={{ background:'rgba(255,255,255,0.02)', border:'1px solid rgba(255,255,255,0.07)', borderRadius:6, padding:'8px 10px', marginBottom:6 }}>
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', cursor:'pointer' }} onClick={() => setExpanded(e => !e)}>
-        <span style={{ fontSize:11, color: saved ? '#4ade80' : '#94a3b8' }}>{saved ? '✅' : '○'} {label}</span>
-        <span style={{ fontSize:10, color:'#475569' }}>{expanded ? '▲' : (saved ? 'change ▼' : 'add ▼')}</span>
+    <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '8px 10px', marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }} onClick={() => setExpanded(e => !e)}>
+        <span style={{ fontSize: 11, color: saved ? '#4ade80' : '#94a3b8' }}>{saved ? '✅' : '○'} {label}</span>
+        <span style={{ fontSize: 10, color: '#475569' }}>{expanded ? '▲' : (saved ? 'change ▼' : 'add ▼')}</span>
       </div>
       {expanded && (
-        <div style={{ marginTop:8 }}>
-          <div style={{ fontSize:9, color:'#475569' }}>USERNAME / EMAIL</div>
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 9, color: '#475569' }}>USERNAME / EMAIL</div>
           <input style={iStyle} value={user} onChange={e => setUser(e.target.value)} placeholder="your@email.com" autoComplete="off" />
-          <div style={{ fontSize:9, color:'#475569', marginTop:6 }}>PASSWORD</div>
+          <div style={{ fontSize: 9, color: '#475569', marginTop: 6 }}>PASSWORD</div>
           <input style={iStyle} type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="••••••••" />
-          <div style={{ display:'flex', gap:6, marginTop:8 }}>
-            <button onClick={save} style={{ flex:1, padding:'5px', background:'#1d4ed8', color:'white', border:'none', borderRadius:5, fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>💾 Save</button>
-            {saved && <button onClick={clear} style={{ padding:'5px 8px', background:'rgba(239,68,68,0.1)', color:'#ef4444', border:'1px solid rgba(239,68,68,0.3)', borderRadius:5, fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>Clear</button>}
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <button onClick={save} style={{ flex: 1, padding: '5px', background: '#1d4ed8', color: 'white', border: 'none', borderRadius: 5, fontSize: 10, cursor: 'pointer', fontFamily: 'inherit' }}>💾 Save</button>
+            {saved && <button onClick={clear} style={{ padding: '5px 8px', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 5, fontSize: 10, cursor: 'pointer', fontFamily: 'inherit' }}>Clear</button>}
           </div>
         </div>
       )}
     </div>
   );
 }
-
 // ── Main Component ─────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [extId, setExtId]           = useState('');
@@ -561,7 +579,10 @@ export default function Dashboard() {
                 return (
                   <div style={{ margin: '14px 0', background: 'rgba(255,255,255,0.02)', borderRadius: 8, padding: '12px 14px', border: '1px solid rgba(255,255,255,0.06)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, alignItems: 'center' }}>
-                      <span style={{ fontSize: 12, color: '#94a3b8' }}>{activeJob.message || `${activeJob.portal?.toUpperCase()} — ${activeJob.status}`}</span>
+                      {/* FIXED: Robust fallback parsing to ensure "undefined" never slips into your dashboard summary panel */}
+                      <span style={{ fontSize: 12, color: '#94a3b8' }}>
+                        {activeJob.message ? activeJob.message : `${String(activeJob.portal || portal || 'Scraper').toUpperCase()} — ${activeJob.status || 'PROCESSING'}`}
+                      </span>
                       <span style={{ fontSize: 13, color: '#3b82f6', fontWeight: 700 }}>{activeJob.progress || 0}%</span>
                     </div>
                     <div style={s.progressTrack}>
@@ -639,6 +660,7 @@ export default function Dashboard() {
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+                {/* Pipeline Distribution Chart */}
                 <div style={s.chartCard}>
                   <div style={s.sectionLabel}>PIPELINE STATUS DISTRIBUTION</div>
                   <ResponsiveContainer width="100%" height={180}>
@@ -650,6 +672,20 @@ export default function Dashboard() {
                       </Pie>
                       <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: '#f8fafc', fontSize: 12 }} />
                     </PieChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Portal Distribution Chart */}
+                <div style={s.chartCard}>
+                  <div style={s.sectionLabel}>TENDERS BY SCRAPER PORTAL</div>
+                  <ResponsiveContainer width="100%" height={180}>
+                    <BarChart data={stats.byPortal || []}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                      <XAxis dataKey="portal" stroke="#64748b" fontSize={10} tickLine={false} />
+                      <YAxis stroke="#64748b" fontSize={10} tickLine={false} />
+                      <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: '#f8fafc', fontSize: 12 }} />
+                      <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                    </BarChart>
                   </ResponsiveContainer>
                 </div>
               </div>

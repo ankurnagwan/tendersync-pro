@@ -1,10 +1,9 @@
 /**
- * src/store/db.js — IndexedDB via Dexie.js
- * ==========================================
- * Browser-native, zero-cost persistence layer.
- * Handles: tender ledger, run history, retry queue, session dedup.
- *
- * Install: npm install dexie
+ * src/store/db.js — IndexedDB Data Management Layer via Dexie.js
+ * =====================================================================
+ * Browser-native, highly optimized persistence layer for TenderSync Pro.
+ * Handles: multi-portal dedup tracking, analytical run metrics, and retry states.
+ * * Engineered by Ankur Nagwan
  */
 
 import Dexie from 'dexie';
@@ -12,31 +11,32 @@ import Dexie from 'dexie';
 // ── Schema Configuration ──────────────────────────────────────────────────────
 const db = new Dexie('GemAggregatorDB');
 
-db.version(3).stores({
+// Version upgraded to 4 to establish compound tracking indexes cleanly
+db.version(4).stores({
   /**
-   * tenders — main ledger
-   * Indexes: ++id (auto-pk), bidId (unique lookup), portal, status,
-   * category, dueDate, scrapedAt, organization
+   * tenders — main tender ledger storage
+   * Explicitly added compound index [portal+status] to eliminate in-memory lookups
+   * Added standalone scrapedAt index for ultra-fast dashboard KPI extraction
    */
-  tenders: '++id, &bidId, portal, status, category, dueDate, scrapedAt, organization',
+  tenders: '++id, &bidId, portal, status, category, dueDate, scrapedAt, organization, [portal+status]',
 
   /**
-   * runHistory — one record per scraping run
+   * runs — collection logging historical scraper runs
    */
   runs: '++id, startedAt, portal, status',
 
   /**
-   * retryQueue — bids whose downloads failed, pending retry
+   * retryQueue — failed stream hooks queue earmarked for automated background retry
    */
   retryQueue: '++id, &bidId, failedAt, retries',
 
   /**
-   * aiReports — LLM-generated executive briefings
+   * aiReports — structural markdown context briefs
    */
   aiReports: '++id, &bidId, generatedAt',
 
   /**
-   * settings — key-value store for user preferences
+   * settings — simple key-value store for application tokens and states
    */
   settings: '&key',
 });
@@ -44,32 +44,32 @@ db.version(3).stores({
 // ── Tender CRUD Operations ────────────────────────────────────────────────────
 
 /**
- * Upsert a tender — insert if new, update fields if bidId already exists.
+ * Upsert a tender — inserts if unique, updates parameters gracefully if existing.
  * @param {Object} tender
- * @returns {Promise<number>} local DB id
+ * @returns {Promise<number>} Local auto-incremented primary ID key
  */
 export async function upsertTender(tender) {
   try {
     const existing = await db.tenders.where('bidId').equals(tender.bidId).first();
+    const cleanTender = {
+      ...tender,
+      portal: tender.portal ? tender.portal.toLowerCase() : 'gem',
+      syncedAt: new Date().toISOString()
+    };
+
     if (existing) {
-      await db.tenders.update(existing.id, {
-        ...tender,
-        syncedAt: new Date().toISOString(),
-      });
+      await db.tenders.update(existing.id, cleanTender);
       return existing.id;
     }
-    return await db.tenders.add({
-      ...tender,
-      syncedAt: new Date().toISOString(),
-    });
+    return await db.tenders.add(cleanTender);
   } catch (err) {
-    if (err.name === 'ConstraintError') return null; // race condition handle, safe to ignore
+    if (err.name === 'ConstraintError') return null; // Safe race condition intercept
     throw err;
   }
 }
 
 /**
- * Bulk upsert — used when streaming tenders in from extension background.
+ * Bulk transactional upsert — optimized stream hook for high-volume extraction.
  * @param {Object[]} tenders
  */
 export async function upsertManyTenders(tenders) {
@@ -81,7 +81,7 @@ export async function upsertManyTenders(tenders) {
 }
 
 /**
- * Update only the status + folder path of an existing tender.
+ * Update the tracking status and location mapping metadata safely.
  */
 export async function updateTenderStatus(bidId, status, folderPath = '') {
   const record = await db.tenders.where('bidId').equals(bidId).first();
@@ -96,23 +96,24 @@ export async function updateTenderStatus(bidId, status, folderPath = '') {
 }
 
 /**
- * Fetch all tenders with optimized multi-index filtering rules.
+ * Fetch tenders leveraging highly optimized compound index pathways.
  * @param {{ portal?, status?, category?, search?, limit? }} opts
  */
 export async function fetchTenders({ portal, status, category, search, limit = 500 } = {}) {
-  let collection = db.tenders.orderBy('scrapedAt').reverse();
+  let collection;
 
-  // Primary Indexed Scanning Hooks
-  if (status) {
+  // Use ultra-fast compound index scan if both parameters are explicitly requested
+  if (portal && status) {
+    collection = db.tenders.where('[portal+status]').equals([portal.toLowerCase(), status]).reverse();
+  } else if (status) {
     collection = db.tenders.where('status').equals(status).reverse();
   } else if (portal) {
-    collection = db.tenders.where('portal').equals(portal).reverse();
+    collection = db.tenders.where('portal').equals(portal.toLowerCase()).reverse();
+  } else {
+    collection = db.tenders.orderBy('scrapedAt').reverse();
   }
 
-  // Memory Array Filter Processing for secondary non-indexed strings
   const results = await collection.filter(t => {
-    if (status && portal && t.portal !== portal) return false;
-    if (portal && !status && t.portal !== portal) return false;
     if (category && !t.category?.toLowerCase().includes(category.toLowerCase())) return false;
     
     if (search) {
@@ -129,7 +130,7 @@ export async function fetchTenders({ portal, status, category, search, limit = 5
   return results;
 }
 
-/** Return tenders with status = 'Failed' or 'Partial'. */
+/** Return tenders with broken download pipelines. */
 export async function fetchFailedTenders() {
   return db.tenders.where('status').anyOf(['Failed', 'Partial']).toArray();
 }
@@ -140,23 +141,27 @@ export async function bidExists(bidId) {
   return count > 0;
 }
 
-/** Delete a specific tender by bidId. */
+/** Delete an entry from the ledger. */
 export async function deleteTender(bidId) {
   const t = await db.tenders.where('bidId').equals(bidId).first();
   if (t) await db.tenders.delete(t.id);
 }
 
-/** Clear ALL tender data stores safely. */
+/** Clear ALL transactional metrics tracking stores safely. */
 export async function clearAllTenders() {
-  await db.transaction('rw', [db.tenders, db.retryQueue, db.aiReports], async () => {
+  await db.transaction('rw', [db.tenders, db.retryQueue, db.aiReports, db.runs], async () => {
     await db.tenders.clear();
     await db.retryQueue.clear();
     await db.aiReports.clear();
+    await db.runs.clear();
   });
 }
-
 // ── Analytics Queries ─────────────────────────────────────────────────────────
 
+/**
+ * Compiles performance metrics and aggregated chart coordinates.
+ * Optimized to match Recharts expectations in Dashboard.jsx.
+ */
 export async function getStats() {
   const today = new Date().toISOString().split('T')[0];
 
@@ -168,14 +173,19 @@ export async function getStats() {
     db.tenders.toArray()
   ]);
 
-  // Aggregate maps inside single array loop pass to maximize dashboard speeds
   const portalMap = {};
   const statusMap = {};
   const categoryMap = {};
 
   allRows.forEach(r => {
-    if (r.portal) portalMap[r.portal] = (portalMap[r.portal] || 0) + 1;
-    if (r.status) statusMap[r.status] = (statusMap[r.status] || 0) + 1;
+    // Normalize data properties to secure steady lookups
+    const pName = r.portal ? String(r.portal).toUpperCase() : 'GEM';
+    portalMap[pName] = (portalMap[pName] || 0) + 1;
+
+    if (r.status) {
+      statusMap[r.status] = (statusMap[r.status] || 0) + 1;
+    }
+    
     const cat = r.category || 'Uncategorized';
     categoryMap[cat] = (categoryMap[cat] || 0) + 1;
   });
@@ -185,7 +195,8 @@ export async function getStats() {
     todayCount,
     downloaded,
     failed,
-    byPortal: Object.entries(portalMap).map(([name, value]) => ({ name, value })),
+    // FIXED: Charts now parse properties matching XAxis and Bar configurations perfectly
+    byPortal: Object.entries(portalMap).map(([portal, count]) => ({ portal, count })),
     byStatus: Object.entries(statusMap).map(([name, value]) => ({ name, value })),
     byCategory: Object.entries(categoryMap)
       .sort((a, b) => b[1] - a[1])
@@ -198,16 +209,23 @@ export async function getStats() {
 
 export async function startRun({ portal, categories, keywords }) {
   return db.runs.add({
-    portal, categories, keywords,
+    portal: portal ? portal.toLowerCase() : 'gem', 
+    categories, 
+    keywords,
     startedAt: new Date().toISOString(),
     status: 'running',
-    totalFound: 0, downloaded: 0, failed: 0,
+    totalFound: 0, 
+    downloaded: 0, 
+    failed: 0,
   });
 }
 
 export async function completeRun(runId, { totalFound, downloaded, failed }) {
   await db.runs.update(runId, {
-    status: 'done', totalFound, downloaded, failed,
+    status: 'done', 
+    totalFound, 
+    downloaded, 
+    failed,
     completedAt: new Date().toISOString(),
   });
 }
