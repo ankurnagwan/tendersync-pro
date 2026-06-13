@@ -53,7 +53,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-// ── Connection Port Handlers ─────────────────────────────────────────────────
+// ── Connection Port Handlers (Internal Popup & External Web Dashboard) ───────
+// Internal connections (Popup UI panel panel linkages)
 chrome.runtime.onConnect.addListener(function(port) {
   if (port.name !== 'gem-dashboard' && port.name !== 'gem-scraper') return;
   state.ports.add(port);
@@ -67,10 +68,32 @@ chrome.runtime.onConnect.addListener(function(port) {
   });
 });
 
+// External web app connections (Fixes the Vercel "Not Connected" dashboard bug)
+chrome.runtime.onConnectExternal.addListener(function(port) {
+  if (port.name !== 'gem-dashboard' && port.name !== 'gem-scraper') return;
+  state.ports.add(port);
+  
+  port.onMessage.addListener(function(msg) {
+    handleDashboard(msg, port);
+  });
+  
+  port.onDisconnect.addListener(function() {
+    state.ports.delete(port);
+  });
+});
+
+// External message ping interceptor for initial handshakes
+chrome.runtime.onMessageExternal.addListener(function(msg, sender, sr) {
+  if (msg.type === C.MSG.GET_EXTENSION_ID) {
+    sr({ extensionId: chrome.runtime.id, version: '3.0.0' });
+  }
+  return true;
+});
+
+// Standard Internal message hub
 chrome.runtime.onMessage.addListener(function(msg, sender, sr) {
   var tabId = sender.tab ? sender.tab.id : null;
   if (!tabId) {
-    // Handle global internal messaging channels
     if (msg.type === C.MSG.GET_STATUS) {
       sr({ running: state.running.size, paused: state.paused });
     }
@@ -128,6 +151,7 @@ chrome.tabs.onUpdated.addListener(function(tabId, info) {
   }
 });
 
+// Clear track states when a user manually closes target tabs
 chrome.tabs.onRemoved.addListener(function(tabId) {
   var jobId = state.tabJobs.get(tabId);
   if (jobId) {
@@ -163,7 +187,7 @@ function enqueueJob(c) {
 }
 
 function drainQueue() {
-  if (state.paused) return; // Halt pipeline processing if engine is paused
+  if (state.paused) return;
   
   var q = [];
   state.jobs.forEach(function(j) {
@@ -187,7 +211,6 @@ function startJob(jobId) {
   } else if (job.portal === 'tendersontime') {
     url = C.URLS.TOT_SEARCH;
   } else {
-    // Dynamic Query string sanitizer fixes the 0 rows / instant termination bug
     let term = job.keywords && job.keywords.length > 0 ? job.keywords[0] : 'latest';
     url = C.URLS.T247_BASE + encodeURIComponent(term);
   }
